@@ -1,0 +1,287 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Endpoint discovery is admin-managed; no app account can redirect tokens.
+    match /runtimeConfig/backend {
+      allow get: if request.auth != null;
+      allow list, create, update, delete: if false;
+    }
+    function owner(uid) { return request.auth != null && request.auth.uid == uid; }
+    function validContact(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 100
+        && d.name.matches("[\\p{L}\\p{M} .'’/@-]+")
+        && d.name.matches('.*\\p{L}.*')
+        && !d.name.matches(' .*|.* ')
+        && d.phone is string && d.phone.size() <= 13
+        && d.phone.matches('\\+60(?:1(?:(?:1888[689]|4400|8(?:47|8[27])[0-4])\\d{4}|9\\d{7,8})|1(?:0(?:[23568]\\d|4[0-6]|7[016-9]|9[0-8])|1(?:[1-5]\\d\\d|6(?:0[5-9]|[1-9]\\d)|7(?:[0-4]\\d|5[0-79]|6[02-4]|8[02-5]))|(?:[26]\\d|[37][1-9]|4[235-9])\\d|5(?:31|9\\d\\d)|8(?:1[23]|[236]\\d|4[06]|5(?:46|[7-9])|7[016-9]|8[01]|9[0-8]))\\d{5}|427[01]\\d{4}|(?:3(?:2[0-36-9]|3[0-368]|4[0-278]|5[0-24-8]|6[0-467]|7[1246-9]|8\\d|9[0-57])\\d|4(?:2[0-689]|[3-79]\\d|8[1-35689])|5(?:2[0-589]|[3468]\\d|5[0-489]|7[1-9]|9[23])|6(?:2[2-9]|3[1357-9]|[46]\\d|5[0-6]|7[0-35-9]|85|9[015-8])|7(?:[2579]\\d|3[03-68]|4[0-8]|6[5-9]|8[0-35-9])|8(?:[24][2-8]|3[2-5]|5[2-7]|6[2-589]|7[2-578]|[89][2-9])|9(?:0[57]|13|[25-7]\\d|[3489][0-8]))\\d{5}|15(?:4(?:6[0-4]\\d|8(?:0[125]|[17]\\d|21|3[01]|4[01589]|5[014]|6[02]))|6(?:32[0-6]|78\\d))\\d{4})')
+        && d.contact in ['Email', 'Phone', 'WhatsApp']
+        && d.notes is string && d.notes.size() <= 1000;
+    }
+    match /brides/{uid} {
+      allow get: if owner(uid);
+      allow list: if false;
+      allow create: if owner(uid)
+        && request.resource.data.keys().hasAll(['uid','email','name','phone','contact','notes','role','membership','points','createdAt','updatedAt'])
+        && request.resource.data.keys().hasOnly(['uid','email','name','phone','contact','notes','role','membership','points','createdAt','updatedAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'bride'
+        && request.resource.data.membership == 'Standard'
+        && request.resource.data.points == 0
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && validContact(request.resource.data);
+      allow update: if owner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','phone','contact','notes','updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && validContact(request.resource.data);
+      allow delete: if false;
+    }
+    match /brides/{uid}/shortlist/{dressId} {
+      allow get, list: if owner(uid);
+      allow create: if owner(uid)
+        && exists(/databases/$(database)/documents/brides/$(uid))
+        && dressId.size() > 0 && dressId.size() <= 128
+        && request.resource.data.keys().hasAll(['dressId', 'savedAt'])
+        && request.resource.data.keys().hasOnly(['dressId', 'savedAt'])
+        && request.resource.data.dressId == dressId
+        && request.resource.data.savedAt == request.time
+        && exists(/databases/$(database)/documents/dresses/$(dressId))
+        && get(/databases/$(database)/documents/dresses/$(dressId)).data.published == true;
+      allow update: if false;
+      allow delete: if owner(uid);
+    }
+    // Trusted administrators provision these documents via the console/Admin SDK.
+    // Clients may inspect their own access, never assign or modify a role.
+    match /staff/{uid} {
+      allow get: if owner(uid);
+      allow list, create, update, delete: if false;
+    }
+    function staffAccess() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/staff/$(request.auth.uid))
+        && get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role in ['staff', 'manager'];
+    }
+    function manager() {
+      return staffAccess()
+        && get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'manager';
+    }
+    function validDressText(value, min, max) {
+      return value is string && value.size() >= min && value.size() <= max
+        && value.matches('[\\s\\S]*\\p{L}[\\s\\S]*')
+        && !value.matches('[\\s\\S]*[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F][\\s\\S]*')
+        && !value.matches('\\s.*|[\\s\\S]*\\s');
+    }
+    function validDressSizes(value) {
+      let sizes = value.split(', ');
+      return sizes.size() > 0 && sizes.size() <= 10
+        && sizes.toSet().size() == sizes.size()
+        && sizes.hasOnly(['XXS','XS','S','M','L','XL','2XL','3XL','4XL','5XL','Made to measure'])
+        && (!sizes.hasAny(['Made to measure']) || sizes.size() == 1);
+    }
+    function validProductDetails(p) {
+      return p is map && p.keys().hasOnly(['neckline','fabricAppearance','train','features'])
+        && (!('neckline' in p) || validDressText(p.neckline,1,160))
+        && (!('fabricAppearance' in p) || validDressText(p.fabricAppearance,1,160))
+        && (!('train' in p) || validDressText(p.train,1,160))
+        && (!('features' in p) || validDressText(p.features,1,600));
+    }
+    function validDress(d) {
+      return d.keys().hasAll(['name','category','description','colour','sizes','priceCents','imageUrl','availability','published','revision','createdBy','createdAt','updatedBy','updatedAt'])
+        && d.keys().hasOnly(['name','category','description','productDetails','colour','sizes','priceCents','imageUrl','photoRevision','arModelId','availability','published','revision','createdBy','createdAt','updatedBy','updatedAt'])
+        && validProductDetails(d.get('productDetails', {}))
+        && d.get('arModelId', '') in ['', 'princess-wedding', 'francine-reference', 'elegant-local-review']
+        && validDressText(d.name, 3, 100)
+        && d.category in ['A-Line','Ball Gown','Mermaid','Sheath']
+        && validDressText(d.description, 20, 3000)
+        && d.colour in ['White','Ivory','Off-white','Champagne','Blush','Nude','Silver','Gold','Red','Blue','Black','Multicolour']
+        && d.sizes is string && d.sizes.size() <= 120 && validDressSizes(d.sizes)
+        && d.priceCents is int && d.priceCents >= 1 && d.priceCents <= 100000000
+        && d.imageUrl is string && d.imageUrl.size() <= 2000
+        && (d.imageUrl == '' || d.imageUrl.matches('https://[^ /@]+[.][^ /@]+.*'))
+        && d.availability in ['Available','Unavailable']
+        && d.get('photoRevision', 0) is int && d.get('photoRevision', 0) >= 0
+        && d.get('photoRevision', 0) <= d.revision
+        && (d.get('photoRevision', 0) == 0 || d.imageUrl == '')
+        && d.published is bool && (!d.published || d.imageUrl.size() > 0 || d.get('photoRevision', 0) > 0)
+        && d.revision is int
+        && d.createdBy is string && d.createdAt is timestamp
+        && d.updatedBy == request.auth.uid && d.updatedAt == request.time;
+    }
+    // The photo reference and payload must commit together. Legacy URL-only
+    // records remain readable/editable; the new UI never asks for a URL.
+    function linkedPhoto(dressId, d) {
+      return d.get('photoRevision', 0) == 0
+        ? !existsAfter(/databases/$(database)/documents/dressPhotos/$(dressId))
+        : getAfter(/databases/$(database)/documents/dressPhotos/$(dressId)).data.revision == d.photoRevision;
+    }
+    match /dresses/{dressId} {
+      allow read: if request.auth != null && (resource.data.published == true || staffAccess());
+      allow create: if manager() && validDress(request.resource.data) && linkedPhoto(dressId, request.resource.data)
+        && request.resource.data.revision == 1
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update: if manager() && validDress(request.resource.data) && linkedPhoto(dressId, request.resource.data)
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt;
+      // Unpublish instead: keep the record for future booking references.
+      allow delete: if false;
+    }
+    function validPhoto(dressId, p) {
+      let dress = getAfter(/databases/$(database)/documents/dresses/$(dressId)).data;
+      return p.keys().hasAll(['data','mime','width','height','revision','updatedBy','updatedAt'])
+        && p.keys().hasOnly(['data','mime','width','height','revision','updatedBy','updatedAt'])
+        && p.mime == 'image/jpeg'
+        && p.data is string && p.data.size() >= 4 && p.data.size() <= 273068
+        && p.data.matches('/9j/[A-Za-z0-9+/]*={0,2}')
+        && p.width is int && p.width >= 1 && p.width <= 1200
+        && p.height is int && p.height >= 1 && p.height <= 1200
+        && p.revision is int && p.revision > 0
+        && p.revision == dress.revision && p.revision == dress.photoRevision
+        && dress.updatedAt == request.time && dress.updatedBy == request.auth.uid
+        && p.updatedBy == request.auth.uid && p.updatedAt == request.time;
+    }
+    match /dressPhotos/{dressId} {
+      allow get: if request.auth != null
+        && (staffAccess() || (
+          get(/databases/$(database)/documents/dresses/$(dressId)).data.published == true
+          && get(/databases/$(database)/documents/dresses/$(dressId)).data.photoRevision == resource.data.revision));
+      allow list: if false;
+      allow create, update: if manager() && validPhoto(dressId, request.resource.data);
+      allow delete: if manager()
+        && getAfter(/databases/$(database)/documents/dresses/$(dressId)).data.photoRevision == 0
+        && getAfter(/databases/$(database)/documents/dresses/$(dressId)).data.updatedAt == request.time;
+    }
+    function validAppointment(d) {
+      return d.keys().hasAll(['uid','name','phone','type','startAt','slotKey','notes','dressId','dressName','status','response','revision','updatedBy','createdAt','updatedAt'])
+        && d.keys().hasOnly(['uid','name','phone','type','startAt','slotKey','notes','dressId','dressName','status','response','revision','updatedBy','createdAt','updatedAt'])
+        && d.uid is string && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+        && d.phone is string && d.phone.size() >= 9 && d.phone.size() <= 25
+        && d.type in ['Dress Trial','Bridal Consultation']
+        && d.startAt is timestamp && d.startAt.minutes() == 0 && d.startAt.seconds() == 0
+        && d.startAt.toMillis() % 3600000 == 0
+        && d.startAt.hours() in [2,3,4,6,7,8]
+        && d.slotKey == string(d.startAt.toMillis())
+        && d.notes is string && d.notes.size() <= 1000
+        && d.dressId is string && d.dressId.size() <= 150
+        && d.dressName is string && d.dressName.size() <= 100
+        && d.status in ['Requested','Confirmed','Declined','Cancelled','Completed']
+        && d.response is string && d.response.size() <= 500
+        && d.revision is int && d.createdAt is timestamp
+        && d.updatedBy == request.auth.uid && d.updatedAt == request.time;
+    }
+    function slotHeld(id, d) {
+      return getAfter(/databases/$(database)/documents/appointmentSlots/$(d.slotKey)).data.appointmentId == id;
+    }
+    match /staffScheduling/{uid} {
+      allow get: if owner(uid) && staffAccess();
+      allow list, write: if false;
+    }
+    function allAppointments() {
+      return manager() ||
+        (exists(/databases/$(database)/documents/staffScheduling/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/staffScheduling/$(request.auth.uid)).data.get('jobRole', '') == 'FrontDesk');
+    }
+    match /appointments/{id} {
+      allow read: if request.auth != null && (
+        resource.data.uid == request.auth.uid ||
+        (staffAccess() && (allAppointments() || resource.data.get('assignedStaffId', '') == request.auth.uid))
+      );
+      allow create: if false && request.auth != null && validAppointment(request.resource.data)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.name == get(/databases/$(database)/documents/brides/$(request.auth.uid)).data.name
+        && request.resource.data.phone == get(/databases/$(database)/documents/brides/$(request.auth.uid)).data.phone
+        && request.resource.data.startAt > request.time
+        && request.resource.data.startAt < request.time + duration.value(180, 'd')
+        && request.resource.data.status == 'Requested' && request.resource.data.response == ''
+        && request.resource.data.revision == 1 && request.resource.data.createdAt == request.time
+        && (request.resource.data.dressId == '' && request.resource.data.dressName == '' ||
+          get(/databases/$(database)/documents/dresses/$(request.resource.data.dressId)).data.published == true &&
+          get(/databases/$(database)/documents/dresses/$(request.resource.data.dressId)).data.name == request.resource.data.dressName);
+      allow update: if false && request.auth != null && validAppointment(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','response','revision','updatedBy','updatedAt'])
+        && request.resource.data.revision == resource.data.revision + 1
+        && ((resource.data.uid == request.auth.uid && resource.data.status in ['Requested','Confirmed']
+            && request.resource.data.status == 'Cancelled' && request.resource.data.response == resource.data.response)
+          || (staffAccess() && ((resource.data.status == 'Requested'
+              && request.resource.data.status in ['Confirmed','Declined','Cancelled'])
+            || (resource.data.status == 'Confirmed' && request.resource.data.status in ['Completed','Cancelled']))))
+        && (request.resource.data.status != 'Confirmed' ||
+          request.resource.data.startAt > request.time && slotHeld(id, request.resource.data))
+        && (request.resource.data.status != 'Completed' || request.resource.data.startAt <= request.time)
+        && (!(resource.data.status == 'Confirmed' && request.resource.data.status == 'Cancelled') ||
+          !existsAfter(/databases/$(database)/documents/appointmentSlots/$(resource.data.slotKey)));
+      allow delete: if false;
+    }
+    match /appointmentSlots/{slot} {
+      allow get: if staffAccess() && allAppointments();
+      allow list, update: if false;
+      allow create: if false && staffAccess()
+        && request.resource.data.keys().hasAll(['appointmentId','uid','startAt'])
+        && request.resource.data.keys().hasOnly(['appointmentId','uid','startAt'])
+        && request.resource.data.appointmentId is string
+        && getAfter(/databases/$(database)/documents/appointments/$(request.resource.data.appointmentId)).data.status == 'Confirmed'
+        && getAfter(/databases/$(database)/documents/appointments/$(request.resource.data.appointmentId)).data.slotKey == slot
+        && getAfter(/databases/$(database)/documents/appointments/$(request.resource.data.appointmentId)).data.uid == request.resource.data.uid
+        && getAfter(/databases/$(database)/documents/appointments/$(request.resource.data.appointmentId)).data.startAt == request.resource.data.startAt;
+      allow delete: if false && request.auth != null && (staffAccess() || resource.data.uid == request.auth.uid)
+        && getAfter(/databases/$(database)/documents/appointments/$(resource.data.appointmentId)).data.status == 'Cancelled';
+    }
+    function supportText(v, min, max) {
+      return v is string && v.size() >= min && v.size() <= max
+        && !v.matches('\\s.*|[\\s\\S]*\\s')
+        && !v.matches('[\\s\\S]*[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F][\\s\\S]*');
+    }
+    function supportParticipant(d) {
+      return request.auth != null && (d.uid == request.auth.uid || staffAccess());
+    }
+    function linkedSupportMessage(id, d) {
+      let p = /databases/$(database)/documents/supportTickets/$(id)/messages/$(d.lastMessageId);
+      let m = getAfter(p).data;
+      return !exists(p) && m.sentAt == request.time && m.senderId == request.auth.uid
+        && d.status == (m.senderRole == 'staff' ? 'In Progress' : 'Open');
+    }
+    match /supportTickets/{id} {
+      allow read: if supportParticipant(resource.data);
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['uid','name','subject','category','status','revision','lastMessageId','updatedBy','createdAt','updatedAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.name == get(/databases/$(database)/documents/brides/$(request.auth.uid)).data.name
+        && supportText(request.resource.data.subject, 3, 120)
+        && request.resource.data.category in ['Appointments','Dresses & AR','Account','Other']
+        && request.resource.data.status == 'Open' && request.resource.data.revision == 1
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time
+        && linkedSupportMessage(id, request.resource.data);
+      allow update: if supportParticipant(resource.data) && resource.data.status != 'Closed'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','revision','lastMessageId','updatedBy','updatedAt'])
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.updatedBy == request.auth.uid && request.resource.data.updatedAt == request.time
+        && (request.resource.data.status == 'Closed' && request.resource.data.lastMessageId == resource.data.lastMessageId
+          || linkedSupportMessage(id, request.resource.data));
+      allow delete: if false;
+      match /messages/{messageId} {
+        allow read: if supportParticipant(get(/databases/$(database)/documents/supportTickets/$(id)).data);
+        allow create: if request.auth != null
+          && request.resource.data.keys().hasOnly(['body','senderId','senderName','senderRole','sentAt'])
+          && supportText(request.resource.data.body, 1, 2000)
+          && request.resource.data.senderId == request.auth.uid && request.resource.data.sentAt == request.time
+          && (request.resource.data.senderRole == 'staff' && staffAccess()
+              && request.resource.data.senderName == get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.name
+            || request.resource.data.senderRole == 'bride'
+              && getAfter(/databases/$(database)/documents/supportTickets/$(id)).data.uid == request.auth.uid
+              && request.resource.data.senderName == get(/databases/$(database)/documents/brides/$(request.auth.uid)).data.name)
+          && getAfter(/databases/$(database)/documents/supportTickets/$(id)).data.lastMessageId == messageId
+          && getAfter(/databases/$(database)/documents/supportTickets/$(id)).data.updatedAt == request.time
+          && getAfter(/databases/$(database)/documents/supportTickets/$(id)).data.status in ['Open','In Progress']
+          && (!exists(/databases/$(database)/documents/supportTickets/$(id))
+            || get(/databases/$(database)/documents/supportTickets/$(id)).data.status != 'Closed');
+        allow update, delete: if false;
+      }
+    }
+    // Other business collections remain blocked.
+    match /{document=**} { allow read, write: if false; }
+  }
+}

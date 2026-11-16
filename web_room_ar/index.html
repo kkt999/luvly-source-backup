@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#fffaf7">
+  <title>Princess · Luvly room view</title>
+  <link rel="stylesheet" href="/room.css">
+  <script type="module" src="/model-viewer-4.4.0.min.js"></script>
+  <script type="module" src="/room.js"></script>
+</head>
+<body>
+  <main>
+    <header><span class="brand">Luvly</span><span class="badge">ROOM VIEW</span></header>
+    <h1>Princess Wedding Dress</h1>
+    <p class="intro">See the gown in your space. Place it on a clear floor, then move around to explore.</p>
+    <model-viewer id="gown" alt="Princess Wedding Dress reference model" camera-controls
+      ar ar-modes="webxr" ar-placement="floor" xr-environment
+      shadow-intensity="1" exposure="1" interaction-prompt="none"
+      camera-orbit="0deg 80deg auto" touch-action="pan-y">
+      <button type="button" id="place" slot="ar-button" disabled>Loading gown…</button>
+      <div id="scan" slot="ar-prompt">Slowly move your phone to find the floor</div>
+      <div id="progress" slot="progress-bar">Loading your gown…</div>
+    </model-viewer>
+    <p id="status" role="status" aria-live="polite">Preparing your room view…</p>
+    <div id="recovery" hidden><button type="button" id="retry">Try again</button></div>
+    <p class="tip">Drag to rotate · Pinch to zoom<br>Use Android Back to return to Luvly.</p>
+    <details><summary>About this view</summary>
+      <p>Space viewing uses Chrome WebXR and Google Play Services for AR on supported Android phones. Your camera starts only when you choose to place the gown. This page does not record or upload camera images.</p>
+      <p>This is a reference model with illustrative scale, not a fit measurement or confirmed boutique stock.</p>
+      <p>Princess Wedding Dress by Messrs · adapted for Luvly.
+        <a href="https://sketchfab.com/3d-models/clothesdress-princess-wedding-dress-0c06a70e6e694660aeb695df418751cb" target="_blank" rel="noopener noreferrer">Original model</a> ·
+        <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a></p>
+    </details>
+  </main>
+</body>
+</html>

@@ -1,0 +1,635 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { PackageService, validatePackage, priceSelection } from './package_service.mjs';
+import { PaymentService } from './payment_service.mjs';
+import { createHandler } from './http_app.mjs';
+import {variantId,rentalDates} from './rental_service.mjs';
+import {packagePaymentQuote} from './bridal_payment_policy.mjs';
+
+const initialPackage = () => ({ id: 'essential', revision: 0, name: 'Essential Bridal', description: 'Dress rental and a personal bridal consultation.', basePriceCents: 250000, active: true,
+  services: [
+    { id: 'dress', name: 'Dress rental', description: 'One dress', kind: 'Required', priceCents: 0 },
+    { id: 'styling', name: 'Accessories styling', description: '', kind: 'Optional', priceCents: 15000 },
+    { id: 'makeup', name: 'Makeup trial', description: '', kind: 'Add-on', priceCents: 35000 },
+  ] });
+class MemoryStore {
+  constructor() { this.data = new Map(Object.entries({
+    'staff/manager': { active: true, role: 'manager' }, 'staff/staff': { active: true, role: 'staff' },
+    'staff/revoked': { active: false, role: 'staff' },
+    'staffScheduling/staff': { jobRole: 'FrontDesk' },
+    'brides/bride': { name: 'Jane', phone: '0123456789', email: 'jane@example.com' },
+    'brides/other': { name: 'Other', phone: '0123456789', email: 'other@example.com' },
+    'brides/revoked': { name: 'Revoked' },
+  })); this.queue = Promise.resolve(); }
+  async get(path) { return structuredClone(this.data.get(path)); }
+  async activeStaffIds(){return [...this.data].filter(([p,d])=>p.startsWith('staff/')&&d.active&&['staff','manager'].includes(d.role)).map(([p])=>p.split('/')[1]).sort();}
+  async listDresses() { return [...this.data].filter(([p]) => p.startsWith('dresses/')).map(([p, d]) => ({ ...structuredClone(d), id: p.split('/')[1] })); }
+  async list(collection, uid) { return [...this.data].filter(([path, d]) => path.startsWith(collection + '/') && (uid === undefined || d.uid === uid)).map(([, d]) => structuredClone(d)); }
+  atomic(fn) {
+    const run = this.queue.then(async () => {
+      const writes = new Map();
+      const result = await fn({ get: path => { assert.equal(writes.size, 0, 'Firestore reads precede all writes'); return this.get(path); },
+        listDresses: () => { assert.equal(writes.size, 0); return this.listDresses(); },
+        hasPackageSelections: async id => {assert.equal(writes.size, 0); return [...this.data].some(([path,d])=>path.startsWith('packageSelections/') && d.packageId===id);},
+        delete: path => writes.set(path, undefined), set: (path, d) => writes.set(path, structuredClone(d)) });
+      for (const [path, d] of writes) {if(d===undefined)this.data.delete(path);else this.data.set(path, d);}
+      return result;
+    }); this.queue = run.catch(() => {}); return run;
+  }
+}
+const fail = code => e => e.code === code;
+const gown = (name = 'Ivory bridal gown') => ({ name, category: 'A-Line', colour: 'Ivory', sizes: 'S, M', description: 'A bridal gown for a fitting.', priceCents: 990000, imageUrl: '', photoRevision: 1, revision: 2, published: true, availability: 'Available' });
+async function gownFixture(count = 1) {
+  const f = await fixture();
+  f.store.data.set('dresses/gown1', gown());
+  f.store.data.set('dresses/gown2', gown('Second gown'));
+  for (const id of ['gown1', 'gown2']) {
+    f.store.data.set(`rentalVariants/${variantId(id, 'M')}`, {quantity: 1, allocations: {}});
+  }
+  f.packageData = await f.service.save('manager', { ...initialPackage(), revision: 1, includedGownCount: count, eligibleDressIds: ['gown1', 'gown2'] });
+  f.input = { ...f.input, revision: 2, gowns: [{ dressId: 'gown1', size: 'M', revision: 2 }] };
+  if (count === 2) f.input.gowns.push({ dressId: 'gown2', size: 'S', revision: 2 });
+  return f;
+}
+const now = Date.UTC(2026, 9, 10, 0);
+const availabilityPlan={pickupDate:'2026-10-16',eventDate:'2026-10-17',returnDate:'2026-10-18'};
+async function availabilityFixture() {
+  const f=await gownFixture();
+  f.query={packageId:f.packageData.id,revision:2,removedIds:['styling'],addonIds:['makeup'],rentalPlan:availabilityPlan};
+  f.variant=`rentalVariants/${variantId('gown1','M')}`;
+  f.store.data.set(f.variant,{quantity:1,allocations:{}});
+  f.dated={...f.input,rentalPlan:availabilityPlan};
+  return f;
+}
+test('date-first availability is read-only, size-specific and never exposes allocations',async()=>{
+  const f=await availabilityFixture(),before=structuredClone([...f.store.data]);
+  const result=await f.service.availability('bride',f.query);
+  assert.deepEqual(result.gowns[0].sizes,[{size:'S',status:'Unconfirmed'},{size:'M',status:'Available'}]);
+  assert.equal(result.reserved,false);
+  assert.deepEqual([...f.store.data],before);
+  assert.equal(/allocations|quantity|customerName|uid/.test(JSON.stringify(result)),false);
+});
+test('early stock check includes all cleaning days and excludes expired holds',async()=>{
+  const f=await availabilityFixture(),dates=rentalDates(availabilityPlan,now);
+  f.store.data.get(f.variant).allocations={other:{state:'Locked',quantity:1,startDay:dates.endDay-1,endDay:dates.endDay+1}};
+  const status=async()=>(await f.service.availability('bride',f.query)).gowns[0].sizes[1].status;
+  assert.equal(await status(),'Unavailable');
+  f.store.data.get(f.variant).allocations.other.startDay=dates.endDay;
+  assert.equal(await status(),'Available');
+  Object.assign(f.store.data.get(f.variant).allocations.other,{state:'Held',startDay:dates.startDay,expiresAt:now});
+  assert.equal(await status(),'Available');
+  f.store.data.get(f.variant).allocations.other.expiresAt=now+1;
+  assert.equal(await status(),'Unavailable');
+});
+
+test('early accessory status distinguishes missing stock, zero stock and overlapping rentals without exposing bookings',async()=>{
+  const f=await availabilityFixture(), dates=rentalDates(availabilityPlan,now);
+  f.store.data.set('accessoryStock/ring-halo',{quantity:0});
+  f.store.data.set('accessoryStock/necklace-pearl',{quantity:1,allocations:{privateBooking:{state:'Locked',quantity:1,startDay:dates.startDay,endDay:dates.endDay}}});
+  f.store.data.set('accessoryStock/veil-short',{quantity:1});
+  const before=structuredClone([...f.store.data]);
+  const result=await f.service.availability('bride',f.query);
+  const status=id=>result.accessories.find(a=>a.itemId===id).status;
+  assert.equal(status('ring-solitaire'),'Unconfirmed');
+  assert.equal(status('ring-halo'),'Unavailable');
+  assert.equal(status('necklace-pearl'),'Unavailable');
+  assert.equal(status('veil-short'),'Available');
+  assert.equal(/privateBooking|allocations|quantity/.test(JSON.stringify(result)),false);
+  assert.deepEqual([...f.store.data],before);
+});
+test('availability validates identity, package revision, services, dates and unknown request fields',async()=>{
+  const f=await availabilityFixture();
+  for(const uid of ['staff','manager','unknown','revoked'])await assert.rejects(f.service.availability(uid,f.query),fail('BRIDE_REQUIRED'));
+  await assert.rejects(f.service.availability('bride',{...f.query,revision:1}),fail('PACKAGE_CHANGED'));
+  await assert.rejects(f.service.availability('bride',{...f.query,rentalPlan:{...availabilityPlan,returnDate:'2026-10-20'}}),fail('PACKAGE_RENTAL_PERIOD'));
+  await assert.rejects(f.service.availability('bride',{...f.query,rentalPlan:{...availabilityPlan,returnDate:'2026-02-30'}}),fail('INVALID_RENTAL_DATE'));
+  await assert.rejects(f.service.availability('bride',{...f.query,quantity:1}),fail('INVALID_SELECTION'));
+  await assert.rejects(f.service.availability('bride',{...f.query,removedIds:['dress']}),fail('MANDATORY_SERVICE'));
+});
+test('dated selection saves dates with gowns atomically, creates no hold and keeps retry identity',async()=>{
+  const f=await availabilityFixture(),s=await f.service.select('bride',f.dated);
+  assert.deepEqual(s.rentalPlan,availabilityPlan);assert.equal(s.rentalPlanRevision,1);
+  assert.equal(s.selectionFlowVersion,1);assert.deepEqual(f.store.data.get(f.variant).allocations,{});
+  assert.deepEqual(await f.service.select('bride',f.dated),s);
+  await assert.rejects(f.service.select('bride',{...f.dated,rentalPlan:{...availabilityPlan,pickupDate:'2026-10-17'}}),fail('REQUEST_CONFLICT'));
+  assert.equal([...f.store.data.keys()].some(p=>/^(rentals|sandboxInvoices)\//.test(p)),false);
+});
+test('snapshot is not a reservation: competing stock is rechecked at save without partial writes',async()=>{
+  const f=await availabilityFixture();await f.service.availability('bride',f.query);
+  f.store.data.get(f.variant).quantity=0;
+  const before=structuredClone([...f.store.data]);
+  await assert.rejects(f.service.select('bride',f.dated),fail('RENTAL_STOCK_UNAVAILABLE'));
+  assert.deepEqual([...f.store.data],before);
+  f.store.data.delete(f.variant);
+  await assert.rejects(f.service.select('bride',f.dated),fail('INVENTORY_NOT_CONFIGURED'));
+});
+test('date-first booking rechecks stock before any fitting fee or appointment is written',async()=>{
+  const f=await availabilityFixture(),s=await f.service.select('bride',f.dated);
+  f.store.data.get(f.variant).quantity=0;
+  const before=structuredClone([...f.store.data]);
+  await assert.rejects(f.service.book('bride',s.id,booking()),fail('RENTAL_STOCK_UNAVAILABLE'));
+  assert.deepEqual([...f.store.data],before);
+});
+test('dated reselection checks revision, stock, visit dates and paid lock before replacing saved choices',async()=>{
+  const f=await availabilityFixture(),s=await f.service.select('bride',f.dated);
+  const input={requestId:'revise-dates',revision:0,packageRevision:2,removedIds:['styling'],addonIds:['makeup'],gowns:f.input.gowns,accessories:[],previewOnly:true,rentalPlan:availabilityPlan,planRevision:1};
+  await assert.rejects(f.service.revise('bride',s.id,{...input,planRevision:0}),fail('RENTAL_PLAN_CHANGED'));
+  f.store.data.get(f.variant).quantity=0;
+  await assert.rejects(f.service.revise('bride',s.id,input),fail('RENTAL_STOCK_UNAVAILABLE'));
+  f.store.data.get(f.variant).quantity=1;
+  const saved=f.store.data.get(`packageSelections/${s.id}`);
+  saved.appointmentIds=['existing'];f.store.data.set('appointments/existing',{uid:'bride',status:'Confirmed',startAt:new Date('2026-10-16T02:00:00Z')});
+  await assert.rejects(f.service.revise('bride',s.id,input),fail('FITTING_DATE_CONFLICT'));
+  saved.appointmentIds=[];
+  const quote=await f.service.revise('bride',s.id,input);
+  await f.service.revise('bride',s.id,{...input,previewOnly:false,expectedTotalCents:quote.totalCents});
+  assert.equal(f.store.data.get(`packageSelections/${s.id}`).rentalPlanRevision,2);
+  f.store.data.get(`packageSelections/${s.id}`).invoiceId='paid-invoice';
+  await assert.rejects(f.service.revise('bride',s.id,input),fail('FITTING_ORDER_LOCKED'));
+});
+test('availability HTTP route authenticates and rejects query overrides',async t=>{
+  const f=await availabilityFixture();
+  const server=createServer(createHandler({service:f.payments,packages:f.service,verifyToken:async token=>{if(token!=='bride')throw Error();return {uid:'bride'};}}));
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const url=`http://127.0.0.1:${server.address().port}/v1/package-availability`;
+  const post=(suffix='',auth=true)=>fetch(url+suffix,{method:'POST',headers:{'Content-Type':'application/json',...(auth?{Authorization:'Bearer bride'}:{})},body:JSON.stringify(f.query)});
+  assert.equal((await post('',false)).status,401);
+  assert.equal((await post('?uid=other')).status,400);
+  const response=await post();assert.equal(response.status,200);assert.equal((await response.json()).reserved,false);
+});
+test('accessories persist with authoritative extra and invoice; retries cannot alter a paid snapshot', async () => {
+  const f = await fixture();
+  f.store.data.get('servicePackages/essential').services[1].priceCents = 7000;
+  const input = {...f.input, removedIds: [], addonIds: [], accessoryCatalogueVersion: 1,
+    accessories: [{serviceId:'styling', itemId:'tiara'}, {serviceId:'styling', itemId:'necklace-floral'}]};
+  const selection = await f.service.select('bride', input);
+  assert.equal(selection.totalCents, 254500);
+  assert.equal(selection.selectedAccessories.length, 2);
+  assert.equal(selection.accessoryExtraCents, 4500);
+  assert.deepEqual(await f.service.select('bride', input), selection);
+  await assert.rejects(f.service.select('bride', {...input, accessories: []}), fail('REQUEST_CONFLICT'));
+  f.store.data.set('appointments/accessory-booking', {uid:'bride', status:'Confirmed', startAt: now + 86400000});
+  f.store.data.get('packageSelections/' + selection.id).appointmentIds = ['accessory-booking'];
+  await assert.rejects(f.service.invoice('staff', selection.id, {appointmentId:'accessory-booking'}),fail('PACKAGE_RENTAL_CONFIRMATION_REQUIRED'));
+  f.store.data.get('servicePackages/essential').services[1].priceCents = 99000;
+  assert.equal((await f.service.selections('bride')).selections[0].totalCents, 254500);
+});
+const booking = () => ({ requestId: 'request-book', type: 'Bridal Consultation', startAt: now + 86400000 + 2 * 3600000, notes: 'Please advise on the fitting.' });
+async function preparationFixture() {
+  const f=await fixture();
+  f.selection=await f.service.select('bride',f.input);
+  const row=f.store.data.get(`packageSelections/${f.selection.id}`);
+  Object.assign(row,{selectedGowns:[{dressId:'gown1',size:'M'}],rentalId:'rental-a',fittingDecision:{state:'Approved'}});
+  f.store.data.set('rentals/rental-a',{state:'Locked',paymentState:'DepositPaid',balanceCents:12345});
+  f.body={requestId:'prepare-one',revision:0,alteration:'NotRequired',preparation:'Preparing',note:'Check veil and steam the selected gown.'};
+  return f;
+}
+test('service preparation persists only internal progress/audit, not rental, payment or attendance',async()=>{
+  const f=await preparationFixture();
+  const before=structuredClone([...f.store.data]);
+  const result=await f.service.serviceProgress('staff',f.selection.id,f.body);
+  assert.equal(result.revision,1);assert.equal(result.by,'staff');
+  assert.equal(f.store.data.get(`rentalServiceProgress/${f.selection.id}`).preparation,'Preparing');
+  assert.deepEqual([...f.store.data].filter(([path])=>!path.startsWith('rentalServiceProgress')),before);
+  assert.equal((await f.service.selections('staff')).selections[0].serviceProgress.note,f.body.note);
+  assert.equal(Object.hasOwn((await f.service.selections('bride')).selections[0],'serviceProgress'),false);
+  assert.equal([...f.store.data.keys()].filter(p=>p.startsWith('rentalServiceProgressAudit/')).length,1);
+});
+test('service preparation restricts writes to active staff and rejects client authority/price fields',async()=>{
+  const f=await preparationFixture();
+  for(const user of ['bride','other','revoked','unknown']) await assert.rejects(f.service.serviceProgress(user,f.selection.id,f.body),fail('STAFF_REQUIRED'));
+  for(const patch of [{uid:'bride'},{paymentState:'Paid'},{by:'manager'},{revision:-1},{note:''},{alteration:'Done'},{preparation:'Collected'}]) {
+    await assert.rejects(f.service.serviceProgress('staff',f.selection.id,{...f.body,...patch}),fail('INVALID_SERVICE_PROGRESS'));
+  }
+  assert.equal([...f.store.data.keys()].some(p=>p.startsWith('rentalServiceProgress/')),false);
+});
+test('preparation has optimistic concurrency and safe same-request retries',async()=>{
+  const f=await preparationFixture();
+  const result=await f.service.serviceProgress('staff',f.selection.id,f.body);
+  assert.deepEqual(await f.service.serviceProgress('staff',f.selection.id,f.body),result);
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,{...f.body,note:'Changed note'}),fail('REQUEST_CONFLICT'));
+  await assert.rejects(f.service.serviceProgress('manager',f.selection.id,f.body),fail('REQUEST_CONFLICT'));
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,{...f.body,requestId:'stale'}),fail('SERVICE_PROGRESS_CHANGED'));
+  const updated=await f.service.serviceProgress('manager',f.selection.id,{...f.body,requestId:'next',revision:1,alteration:'Completed',preparation:'Ready'});
+  assert.equal(updated.revision,2);
+  assert.equal(f.store.data.get(`rentalServiceProgressAudit/${f.selection.id}_2`).previous.revision,1);
+});
+test('prepared items require approved fitting, reserved stock and completed/not-needed alterations',async()=>{
+  const f=await preparationFixture();
+  const ready={...f.body,preparation:'Ready'};
+  const row=f.store.data.get(`packageSelections/${f.selection.id}`),rental=f.store.data.get('rentals/rental-a');
+  row.fittingDecision=null;
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,ready),fail('SERVICE_NOT_READY'));
+  row.fittingDecision={state:'Approved'};rental.state='Held';
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,ready),fail('SERVICE_NOT_READY'));
+  rental.state='Locked';
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,{...ready,alteration:'InProgress'}),fail('SERVICE_NOT_READY'));
+  await f.service.serviceProgress('staff',f.selection.id,ready);
+  assert.equal(rental.paymentState,'DepositPaid'); // Physical preparation is not payment verification.
+});
+test('collected/returned/cancelled/expired/review rentals lock preparation; missing items cannot be prepared',async()=>{
+  for(const patch of [{fulfilment:'Collected'},{fulfilment:'Returned'},{collectedAt:now},{returnedAt:now},{state:'Cancelled'},{state:'Expired'},{state:'PaymentReview'}]){
+    const f=await preparationFixture();Object.assign(f.store.data.get('rentals/rental-a'),patch);
+    await assert.rejects(f.service.serviceProgress('staff',f.selection.id,f.body),fail('SERVICE_PROGRESS_CLOSED'));
+  }
+  const f=await preparationFixture();f.store.data.get(`packageSelections/${f.selection.id}`).selectedGowns=[];
+  await assert.rejects(f.service.serviceProgress('staff',f.selection.id,f.body),fail('SERVICE_ITEMS_REQUIRED'));
+});
+test('service preparation HTTP endpoint requires authentication and rejects scope query',async()=>{
+  const f=await preparationFixture();
+  const server=createServer(createHandler({service:f.payments,packages:f.service,verifyToken:async token=>({uid:token})}));
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const url=`http://127.0.0.1:${server.address().port}/v1/package-selections/${f.selection.id}/service-progress`;
+    const send=(suffix='',token)=>fetch(url+suffix,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify(f.body)});
+    assert.equal((await send()).status,401);
+    assert.equal((await send('?uid=manager','staff')).status,400);
+    assert.equal((await send('','bride')).status,403);
+    assert.equal((await send('','staff')).status,200);
+  }finally{await new Promise(resolve=>server.close(resolve));}
+});
+test('a replacement rental never inherits old preparation, while revision and audit are retained',async()=>{
+  const f=await preparationFixture();
+  await f.service.serviceProgress('staff',f.selection.id,{...f.body,preparation:'Ready'});
+  f.store.data.get(`packageSelections/${f.selection.id}`).rentalId='replacement';
+  f.store.data.set('rentals/replacement',{state:'Locked'});
+  const row=(await f.service.selections('staff')).selections[0];
+  assert.equal(row.serviceProgress,null);assert.equal(row.serviceProgressRevision,1);
+  const next=await f.service.serviceProgress('staff',f.selection.id,{...f.body,requestId:'replacement-prep',revision:1});
+  assert.equal(next.rentalId,'replacement');assert.equal(next.revision,2);
+  assert.equal(f.store.data.get(`rentalServiceProgressAudit/${f.selection.id}_2`).previous.preparation,'Ready');
+});
+async function fixture() {
+  const store = new MemoryStore();
+  for(let d=0;d<180;d++)store.data.set(`appointmentAvailability/${new Date(now+d*86400000).toISOString().slice(0,10)}`,{entries:{staff:{available:true,startHour:10,endHour:17}},bookings:{},revision:1});
+  const gateway = { createBill: async x => ({ reference: x.reference, amountCents: x.amountCents, billCode: 'test123', checkoutUrl: 'https://dev.toyyibpay.com/test123', environment: 'sandbox' }),
+    reconcile: async x => ({ state: 'SandboxPaid', environment: 'sandbox', reference: x.reference, billCode: x.billCode, amountCents: x.amountCents, invoiceNo: 'TEST-RECEIPT' }) };
+  const payments = new PaymentService({ store, gateway, returnUrl: 'https://example.com/return', callbackUrl: 'https://example.com/callback', now: () => now });
+  const service = new PackageService({ store, paymentService: payments, now: () => now });
+  const packageData = await service.save('manager', initialPackage());
+  const input = { requestId: 'choose-1', packageId: packageData.id, revision: 1, removedIds: ['styling'], addonIds: ['makeup'] };
+  return { store, gateway, payments, service, packageData, input };
+}
+test('standard and customized totals; required removal, unknown add-ons and duplicates rejected', () => {
+  const p = initialPackage();
+  assert.equal(priceSelection(p, [], []).totalCents, 250000);
+  assert.equal(priceSelection(p, ['styling'], ['makeup']).totalCents, 270000);
+  for (const [removed, added, error] of [[['dress'], [], 'MANDATORY_SERVICE'], [[], ['unknown'], 'INVALID_ADDON'], [[], ['makeup', 'makeup'], 'DUPLICATE_SERVICE'], [['styling', 'styling'], [], 'DUPLICATE_SERVICE']]) assert.throws(() => priceSelection(p, removed, added), fail(error));
+});
+
+test('gown catalogue authenticates, filters unpublished/unavailable and exposes only public fields', async () => {
+  const f = await gownFixture();
+  f.store.data.set('dresses/private', { ...gown(), published: false });
+  f.store.data.set('dresses/unavailable', { ...gown(), availability: 'Unavailable' });
+  f.store.data.get('dresses/gown1').internalNotes = 'not public';
+  const result = await f.service.gowns('bride');
+  assert.deepEqual(result.dresses.map(d => d.id), ['gown1', 'gown2']);
+  assert(!Object.hasOwn(result.dresses[0], 'internalNotes'));
+  await assert.rejects(f.service.gowns('revoked'), fail('ACCOUNT_ACCESS_REQUIRED'));
+});
+
+test('staff assistance is not a selectable gown size', async () => {
+  const f = await gownFixture();
+  const before = [...f.store.data.keys()].filter(k => k.startsWith('rentalVariants/'));
+  await assert.rejects(f.service.select('bride', { ...f.input, gowns: [{ ...f.input.gowns[0], size: 'Staff to confirm' }] }), fail('PACKAGE_GOWN_SIZE'));
+  assert.deepEqual([...f.store.data.keys()].filter(k => k.startsWith('rentalVariants/')), before);
+});
+
+test('included gowns and sizes are snapshotted without adding catalogue prices; retries are safe', async () => {
+  const f = await gownFixture(2);
+  const saved = await f.service.select('bride', f.input);
+  assert.equal(saved.totalCents, 270000);
+  assert.equal(saved.includedGownCount, 2);
+  assert.deepEqual(saved.selectedGowns.map(g => [g.name, g.size]), [['Ivory bridal gown', 'M'], ['Second gown', 'S']]);
+  f.store.data.get('dresses/gown1').name = 'Changed later';
+  const retry = await f.service.select('bride', { ...f.input, gowns: [...f.input.gowns].reverse() });
+  assert.equal(retry.id, saved.id);
+  assert.equal(retry.selectedGowns[0].name, 'Ivory bridal gown');
+  await assert.rejects(f.service.select('bride', { ...f.input, gowns: [{ ...f.input.gowns[0], size: 'S' }, f.input.gowns[1]] }), fail('REQUEST_CONFLICT'));
+  f.store.data.get(`packageSelections/${saved.id}`).rentalPlan={pickupDate:'2026-10-16',eventDate:'2026-10-17',returnDate:'2026-10-18'};
+  const a = await f.service.book('bride', saved.id, booking());
+  f.store.data.get(`appointments/${a.appointmentId}`).status = 'Confirmed';
+  await assert.rejects(f.service.invoice('manager', saved.id, { appointmentId: a.appointmentId }),fail('PACKAGE_RENTAL_CONFIRMATION_REQUIRED'));
+  await assert.rejects(f.payments.createQuote('manager', { appointmentId: a.appointmentId, purpose: 'DressPayment', amountCents: 990000 }), fail('APPOINTMENT_HAS_PACKAGE'));
+});
+
+test('gown selection rejects missing, repeated, forged, wrong-size, stale and ineligible choices', async () => {
+  const f = await gownFixture();
+  const choice = f.input.gowns[0];
+  for (const [gowns, code] of [
+    [[], 'PACKAGE_GOWN_COUNT'],
+    [[choice, choice], 'INVALID_GOWN_SELECTION'],
+    [[{ ...choice, priceCents: 0 }], 'INVALID_GOWN_SELECTION'],
+    [[{ ...choice, dressId: 'not-in-package' }], 'PACKAGE_GOWN_NOT_ELIGIBLE'],
+    [[{ ...choice, size: 'XL' }], 'PACKAGE_GOWN_SIZE'],
+    [[{ ...choice, revision: 1 }], 'PACKAGE_GOWN_CHANGED'],
+  ]) await assert.rejects(f.service.select('bride', { ...f.input, gowns }), fail(code));
+  for (const change of [{ published: false }, { availability: 'Unavailable' }]) {
+    f.store.data.set('dresses/gown1', { ...gown(), ...change });
+    await assert.rejects(f.service.select('bride', f.input), fail('PACKAGE_GOWN_UNAVAILABLE'));
+  }
+  f.store.data.delete('dresses/gown1');
+  await assert.rejects(f.service.select('bride', f.input), fail('PACKAGE_GOWN_UNAVAILABLE'));
+  assert.equal((await f.service.selections('bride')).selections.length, 0);
+});
+test('rental package booking rejects a fitting after the wedding before writing an appointment',async()=>{
+  const f=await gownFixture(),s=await f.service.select('bride',f.input);
+  await assert.rejects(f.service.book('bride',s.id,{...booking(),startAt:Date.parse('2026-10-18T02:00:00Z')}),fail('RENTAL_PLAN_REQUIRED'));
+  f.store.data.get(`packageSelections/${s.id}`).rentalPlan={pickupDate:'2026-10-19',eventDate:'2026-10-20',returnDate:'2026-10-21'};
+  for(const startAt of [Date.parse('2026-10-19T02:00:00Z'),Date.parse('2026-10-21T02:00:00Z')]) {
+    await assert.rejects(f.service.book('bride',s.id,{...booking(),startAt}),fail('FITTING_DATE_CONFLICT'));
+  }
+  assert.equal(f.store.data.get(`packageSelections/${s.id}`).appointmentIds.length,0);
+  const result=await f.service.book('bride',s.id,{...booking(),startAt:Date.parse('2026-10-18T02:00:00Z')});
+  assert.ok(result.appointmentId);
+});
+
+test('gown eligibility config validates counts and IDs and blocks stale clients from clearing entitlement', async () => {
+  for (const fields of [{ includedGownCount: -1 }, { includedGownCount: 101 }, { includedGownCount: '1' },
+    { includedGownCount: 1, eligibleDressIds: ['x', 'x'] }, { includedGownCount: 0, eligibleDressIds: ['x'] }]) {
+    assert.throws(() => validatePackage({ ...initialPackage(), ...fields }), fail('INVALID_PACKAGE_GOWNS'));
+  }
+  const f = await gownFixture();
+  await assert.rejects(f.service.save('manager', { ...initialPackage(), revision: 2 }), fail('PACKAGE_CLIENT_UPDATE_REQUIRED'));
+  await assert.rejects(f.service.save('manager', { ...initialPackage(), revision: 2, includedGownCount: 1, eligibleDressIds: ['missing'] }), fail('PACKAGE_GOWN_UNAVAILABLE'));
+});
+test('draft stays hidden and publishing requires enough distinct stocked, published gowns', async () => {
+  const f = await fixture();
+  const variant = id => `rentalVariants/${variantId(id, 'M')}`;
+  f.store.data.set('dresses/first', gown());
+  f.store.data.set('dresses/second', { ...gown(), published: false });
+  f.store.data.set(variant('first'), {quantity: 3});
+  const input = { ...initialPackage(), id: 'duo', active: false, includedGownCount: 2, eligibleDressIds: ['first'] };
+  const draft = await f.service.save('manager', input);
+  assert.equal(draft.draft, true);
+  assert.equal((await f.service.catalogue('bride')).packages.some(p => p.id === input.id), false);
+  const publish = {...input, active: true, revision: 1};
+  await assert.rejects(f.service.save('manager', publish), fail('PACKAGE_GOWNS_NOT_READY'));
+  publish.eligibleDressIds = ['first', 'second'];
+  f.store.data.set(variant('second'), {quantity: 1});
+  await assert.rejects(f.service.save('manager', publish), fail('PACKAGE_GOWNS_NOT_READY'));
+  f.store.data.get('dresses/second').published = true;
+  f.store.data.set(variant('second'), {quantity: 0});
+  await assert.rejects(f.service.save('manager', publish), fail('PACKAGE_GOWNS_NOT_READY'));
+  f.store.data.set(variant('second'), {quantity: 1});
+  const published = await f.service.save('manager', publish);
+  assert.equal(published.draft, false);
+  assert.equal((await f.service.catalogue('bride')).packages.some(p => p.id === input.id), true);
+  f.store.data.delete('dresses/second');
+  const paused = await f.service.save('manager', {...publish, revision: 2, active: false});
+  assert.equal(paused.active, false);
+  assert.equal(paused.draft, false);
+});
+test('catalogue-wide packages allow four stocked styles and follow changes in stock', async () => {
+  const f = await fixture();
+  const ids = ['first', 'second', 'third', 'fourth'];
+  const variant = id => `rentalVariants/${variantId(id, 'M')}`;
+  for (const id of ids) {
+    f.store.data.set(`dresses/${id}`, gown(id));
+    f.store.data.set(variant(id), {quantity: 3});
+  }
+  f.store.data.set('dresses/fifth', gown('fifth'));
+  f.store.data.set(variant('fifth'), {quantity: 0});
+  f.store.data.set('dresses/hidden', {...gown(), published: false});
+  f.store.data.set(variant('hidden'), {quantity: 1});
+  f.store.data.set('dresses/custom', {...gown(), sizes: 'Made to measure'});
+  f.store.data.set(`rentalVariants/${variantId('custom', 'Made to measure')}`, {quantity: 1});
+  f.store.data.set('dresses/unavailable', {...gown(), availability: 'Unavailable'});
+  f.store.data.set(variant('unavailable'), {quantity: 1});
+  assert.deepEqual(await f.service.gownLimit('manager'), {maxGowns: 4});
+  await assert.rejects(f.service.gownLimit('staff'), fail('MANAGER_REQUIRED'));
+  const input = {...initialPackage(), revision: 1, allCatalogueGowns: true,
+    includedGownCount: 4, eligibleDressIds: []};
+  for (const active of [false, true]) {
+    await assert.rejects(f.service.save('manager', {...input, active, includedGownCount: 5}),
+      fail('PACKAGE_GOWN_LIMIT_CHANGED'));
+  }
+  const published = await f.service.save('manager', input);
+  assert.deepEqual(published.eligibleDressIds, []);
+  const selection = {...f.input, revision: published.revision, rentalPlan: availabilityPlan,
+    gowns: ids.map(dressId => ({dressId, size: 'M', revision: 2}))};
+  const query = {packageId: selection.packageId, revision: selection.revision,
+    removedIds: selection.removedIds, addonIds: selection.addonIds, rentalPlan: selection.rentalPlan};
+  const availableIds = async () => (await f.service.availability('bride', query)).gowns
+    .filter(dress => dress.sizes.some(size => size.status === 'Available')).map(dress => dress.dressId);
+  assert.deepEqual(await availableIds(), ids);
+  const saved = await f.service.select('bride', selection);
+  assert.deepEqual(saved.selectedGowns.map(dress => dress.dressId), ids);
+  assert.equal(packagePaymentQuote(saved.totalCents, saved.selectedGowns.length).securityCents, 120000);
+  f.store.data.set(variant('fourth'), {quantity: 0});
+  await assert.rejects(f.service.select('bride', {...selection, requestId: 'no-stock'}),
+    fail('RENTAL_STOCK_UNAVAILABLE'));
+  f.store.data.set(variant('fifth'), {quantity: 1});
+  assert.deepEqual(await availableIds(), [...ids.slice(0, 3), 'fifth']);
+  assert.deepEqual(await f.service.gownLimit('manager'), {maxGowns: 4});
+});
+test('typed services drive rental days and accessory charges independently of their display name', async () => {
+  const f = await availabilityFixture();
+  const services = [
+    ...initialPackage().services,
+    {id: 'veil', name: 'Ceremony finish', kind: 'Required', description: '', priceCents: 0,
+      serviceType: 'veil-rental', accessoryAllowanceCents: 6000},
+    {id: 'day', name: 'Extend rental by one day', kind: 'Add-on', description: '', priceCents: 8000,
+      serviceType: 'extra-rental-day'},
+  ];
+  const updated = await f.service.save('manager', {
+    ...initialPackage(), revision: 2, includedGownCount: 1,
+    eligibleDressIds: ['gown1', 'gown2'], services,
+  });
+  assert.equal((await f.service.catalogue('bride')).packages.length, 0);
+  assert.equal((await f.service.catalogue('bride', true)).packages[0].revision, updated.revision);
+  assert.equal((await f.service.catalogue('staff')).packages.length, 1);
+  const plan = {...availabilityPlan, returnDate: '2026-10-19'};
+  f.store.data.set('accessoryStock/veil-short', {quantity: 1, allocations: {}});
+  const input = {...f.dated, revision: updated.revision, removedIds: ['styling'], addonIds: ['day'],
+    rentalPlan: plan, accessories: [{serviceId: 'veil', itemId: 'veil-short'}], accessoryCatalogueVersion: 1};
+  await assert.rejects(f.service.select('bride', input), fail('PACKAGE_CLIENT_UPDATE_REQUIRED'));
+  await assert.rejects(f.service.select('bride', {...input, expectedTotalCents: 243000}), fail('PACKAGE_CHANGED'));
+  const total = 250000 - 15000 + 8000 + 2000;
+  const saved = await f.service.select('bride', {...input, expectedTotalCents: total});
+  assert.equal(saved.totalCents, total);
+  assert.equal(saved.accessoryCharges.find(c => c.serviceId === 'veil').extraCents, 2000);
+  assert.equal(saved.rentalPlan.returnDate, plan.returnDate);
+  const oldClientRows = services.map(({serviceType, accessoryAllowanceCents, ...s}) => s);
+  await assert.rejects(f.service.save('manager', {
+    ...initialPackage(), revision: 3, includedGownCount: 1,
+    eligibleDressIds: ['gown1', 'gown2'], services: oldClientRows,
+  }), fail('PACKAGE_CLIENT_UPDATE_REQUIRED'));
+});
+test('invalid prices, services, missing fields and unexpected fields cannot enter catalogue', () => {
+  const cases = [p => p.basePriceCents = -1, p => p.basePriceCents = '250000', p => p.basePriceCents = 15000,
+    p => p.services[0].kind = 'Optional', p => p.services.push({ ...p.services[0] }), p => p.name = '  Wedding ',
+    p => p.services[1].priceCents = 1.5, p => p.uid = 'attacker', p => p.services[0].priceCents = 100, p => p.services = []];
+  for (const mutate of cases) { const p = initialPackage(); mutate(p); assert.throws(() => validatePackage(p)); }
+});
+test('only active managers manage packages; staff retain read-only catalogue access', async () => {
+  const f = await fixture();
+  await f.service.save('manager', { ...f.packageData, createdAt: undefined }).catch(e => assert.equal(e.code, 'INVALID_PACKAGE'));
+  for (const uid of ['staff', 'bride', 'other', 'revoked', 'unknown']) {
+    await assert.rejects(f.service.save(uid, initialPackage()), fail('MANAGER_REQUIRED'));
+    await assert.rejects(f.service.save(uid, {...initialPackage(),revision:1,active:false}), fail('MANAGER_REQUIRED'));
+  }
+  assert.equal((await f.service.catalogue('staff')).packages.length,1);
+  const updated = await f.service.save('manager', { ...initialPackage(), revision: 1, name: 'Revised Bridal' });
+  assert.equal(updated.revision, 2); assert.equal(updated.updatedBy, 'manager');
+  await assert.rejects(f.service.save('manager', { ...initialPackage(), revision: 1 }), fail('PACKAGE_CHANGED'));
+  f.store.data.get('staff/manager').active=false;
+  await assert.rejects(f.service.save('manager', {...initialPackage(),revision:2}),fail('MANAGER_REQUIRED'));
+});
+test('inactive packages are hidden from brides; old selections and prices remain intact', async () => {
+  const f = await fixture(); const selected = await f.service.select('bride', f.input);
+  await f.service.save('manager', { ...initialPackage(), revision: 1, active: false, basePriceCents: 300000 });
+  assert.equal((await f.service.catalogue('bride')).packages.length, 0);
+  assert.equal((await f.service.catalogue('staff')).packages.length, 1);
+  assert.equal((await f.service.selections('bride')).selections[0].totalCents, selected.totalCents);
+  await assert.rejects(f.service.select('bride', { ...f.input, requestId: 'new' }), fail('PACKAGE_UNAVAILABLE'));
+  assert.equal((await f.service.select('bride', f.input)).id, selected.id);
+});
+
+test('manager deletion rejects all non-managers and stale versions, deletes only unused packages with audit snapshot', async () => {
+  const f=await fixture(), before=structuredClone([...f.store.data]);
+  for(const uid of ['staff','revoked','bride','unknown']) await assert.rejects(f.service.remove(uid,'essential',{revision:1}),fail('MANAGER_REQUIRED'));
+  await assert.rejects(f.service.remove('manager','essential',{revision:2}),fail('PACKAGE_CHANGED'));
+  await assert.rejects(f.service.remove('manager','essential',{revision:1,force:true}),fail('INVALID_PACKAGE'));
+  assert.deepEqual([...f.store.data],before);
+  assert.deepEqual(await f.service.remove('manager','essential',{revision:1}),{deleted:true,packageId:'essential'});
+  assert.equal(await f.store.get('servicePackages/essential'),undefined);
+  assert.equal((await f.service.catalogue('staff')).packages.length,0);
+  const audit=(await f.store.list('packageCatalogueAudit'))[0];
+  assert.equal(audit.actorId,'manager');assert.equal(audit.snapshot.name,initialPackage().name);
+  await assert.rejects(f.service.select('bride',f.input),fail('PACKAGE_UNAVAILABLE'));
+});
+
+test('referenced packages cannot be deleted; deactivation retains customer plans and invoices', async()=>{
+  const f=await fixture(), selected=await f.service.select('bride',f.input);
+  const before=structuredClone([...f.store.data]);
+  await assert.rejects(f.service.remove('manager','essential',{revision:1}),fail('PACKAGE_IN_USE'));
+  assert.deepEqual([...f.store.data],before);
+  await f.service.save('manager',{...initialPackage(),revision:1,active:false});
+  await assert.rejects(f.service.remove('manager','essential',{revision:2}),fail('PACKAGE_IN_USE'));
+  assert.deepEqual((await f.service.selections('bride')).selections[0].totalCents,selected.totalCents);
+});
+
+test('concurrent customer selection and deletion cannot create an orphaned plan',async()=>{
+  for(const deleteFirst of [false,true]){
+    const f=await fixture();
+    const actions=deleteFirst
+      ? [()=>f.service.remove('manager','essential',{revision:1}),()=>f.service.select('bride',f.input)]
+      : [()=>f.service.select('bride',f.input),()=>f.service.remove('manager','essential',{revision:1})];
+    const results=await Promise.allSettled(actions.map(run=>run()));
+    assert.equal(results[0].status,'fulfilled');assert.equal(results[1].status,'rejected');
+    assert.equal(results[1].reason.code,deleteFirst?'PACKAGE_UNAVAILABLE':'PACKAGE_IN_USE');
+  }
+});
+test('price changes require a fresh review; client price and owner overrides rejected', async () => {
+  const f = await fixture();
+  await f.service.save('manager', { ...initialPackage(), revision: 1, basePriceCents: 300000 });
+  await assert.rejects(f.service.select('bride', f.input), fail('PACKAGE_CHANGED'));
+  for (const fields of [{ uid: 'other' }, { totalCents: 1 }, { removedIds: null }]) await assert.rejects(f.service.select('bride', { ...f.input, ...fields }), fail('INVALID_SELECTION'));
+});
+test('selection retries and concurrent submissions produce one immutable selection', async () => {
+  const f = await fixture();
+  const values = await Promise.all([f.service.select('bride', f.input), f.service.select('bride', f.input)]);
+  assert.equal(values[0].id, values[1].id);
+  assert.equal((await f.service.selections('bride')).selections.length, 1);
+  await assert.rejects(f.service.select('bride', { ...f.input, addonIds: [] }), fail('REQUEST_CONFLICT'));
+});
+test('customer selections are isolated; staff cannot impersonate bride and revocation applies', async () => {
+  const f = await fixture(); await f.service.select('bride', f.input);
+  assert.equal((await f.service.selections('other')).selections.length, 0);
+  assert.equal((await f.service.selections('staff')).selections.length, 1);
+  for (const uid of ['staff', 'manager', 'revoked']) await assert.rejects(f.service.select(uid, f.input), fail('BRIDE_REQUIRED'));
+  await assert.rejects(f.service.selections('revoked'), fail('ACCOUNT_ACCESS_REQUIRED'));
+});
+test('package booking stores server contact, request state and selection link; retries are idempotent', async () => {
+  const f = await fixture(); const s = await f.service.select('bride', f.input);
+  const a = await f.service.book('bride', s.id, booking());
+  assert.deepEqual(await f.service.book('bride', s.id, booking()), a);
+  const saved = await f.store.get(`appointments/${a.appointmentId}`);
+  assert.equal(saved.status, 'Confirmed'); assert.equal(saved.name, 'Jane'); assert.match(saved.notes, /Essential Bridal/);
+  assert.deepEqual((await f.service.selections('bride')).selections[0].appointments.map(b => b.status), ['Confirmed']);
+  await assert.rejects(f.service.book('other', s.id, booking()), fail('SELECTION_ACCESS_DENIED'));
+  await assert.rejects(f.service.book('bride', s.id, { ...booking(), requestId: 'duplicate' }), fail('PACKAGE_BOOKING_EXISTS'));
+});
+test('past, outside-hours, occupied and forged package bookings are rejected', async () => {
+  const f = await fixture(); const s = await f.service.select('bride', f.input);
+  for (const changes of [{ startAt: now - 1 }, { startAt: now + 3600000 }, { startAt: booking().startAt + 1 }, { notes: 'x'.repeat(701) }, { uid: 'other' }]) await assert.rejects(f.service.book('bride', s.id, { ...booking(), ...changes }), fail('INVALID_BOOKING'));
+  f.store.data.set(`appointmentSlots/${booking().startAt}`, { appointmentId: 'occupied' });
+  await assert.rejects(f.service.book('bride', s.id, booking()), fail('SLOT_UNAVAILABLE'));
+});
+test('package and standalone bookings share the same atomic boutique capacity',async()=>{
+ const f=await fixture(),s=await f.service.select('bride',f.input);
+ const results=await Promise.allSettled([
+   f.service.book('bride',s.id,booking()),
+   f.service.bookings.create('other',{requestId:'standalone',type:'Dress Trial',startAt:booking().startAt,notes:''}),
+ ]);
+ assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+ assert.equal(results.find(r=>r.status==='rejected').reason.code,'SLOT_UNAVAILABLE');
+});
+test('linked visits follow the same appointment access policy', async () => {
+  const f = await fixture();
+  const selection = await f.service.select('bride', f.input);
+  const visit = await f.service.book('bride', selection.id, {...booking(), type:'Dress Trial'});
+  const row = f.store.data.get(`appointments/${visit.appointmentId}`);
+  f.store.data.set('staff/artist', {active:true,role:'staff'});
+  f.store.data.set('staffScheduling/artist', {jobRole:'MakeupArtist'});
+  for (const uid of ['staff','manager','bride']) {
+    assert.equal((await f.service.selections(uid)).selections[0].appointments[0].id,visit.appointmentId);
+  }
+  assert.deepEqual((await f.service.selections('artist')).selections,[]);
+  await assert.rejects(f.service.assignedFitting('artist',selection.id),fail('SELECTION_ACCESS_DENIED'));
+  await assert.rejects(f.service.invoice('artist',selection.id,{appointmentId:visit.appointmentId}),fail('OPERATIONS_ACCESS_REQUIRED'));
+  row.assignedStaffId='artist';
+  row.status='Confirmed';
+  const fitting = await f.service.assignedFitting('artist',selection.id);
+  assert.equal(fitting.appointments[0].id,visit.appointmentId);
+  for (const field of ['totalCents','invoice','invoiceId','rental','rentalId','services','fittingQuote']) assert(!Object.hasOwn(fitting,field));
+});
+test('package invoice uses saved total, requires linked confirmed appointment and active staff role', async () => {
+  const f = await fixture(); const s = await f.service.select('bride', f.input);
+  const a = await f.service.book('bride', s.id, booking());
+  const input = { appointmentId: a.appointmentId };
+  for (const uid of ['bride', 'other', 'revoked', 'unknown']) await assert.rejects(f.service.invoice(uid, s.id, input), fail('STAFF_REQUIRED'));
+  f.store.data.get(`appointments/${a.appointmentId}`).status = 'Cancelled';
+  await assert.rejects(f.service.invoice('staff', s.id, input), fail('CONFIRMED_APPOINTMENT_REQUIRED'));
+  await assert.rejects(f.service.invoice('manager', s.id, input), fail('CONFIRMED_APPOINTMENT_REQUIRED'));
+  f.store.data.get(`appointments/${a.appointmentId}`).status = 'Confirmed';
+  await assert.rejects(f.service.invoice('manager', s.id, { ...input, amountCents: 1 }), fail('INVALID_QUOTE'));
+  await assert.rejects(f.service.invoice('staff', s.id, { ...input, amountCents: 1 }), fail('INVALID_QUOTE'));
+  await assert.rejects(f.service.invoice('staff', s.id, { ...input, state: 'SandboxPaid' }), fail('INVALID_QUOTE'));
+  const result = await f.service.invoice('staff', s.id, input);
+  assert.equal(f.store.data.get(`sandboxInvoices/${result.id}`).createdBy, 'staff');
+  assert.equal((await f.service.invoice('staff', s.id, input)).id, result.id);
+  assert.equal(result.amountCents, 270000); assert.equal(result.state, 'Quoted');
+  assert.equal((await f.service.invoice('manager', s.id, input)).id, result.id);
+  await assert.rejects(f.payments.createQuote('manager', { ...input, purpose: 'DressPayment', amountCents: 270000 }), fail('APPOINTMENT_HAS_PACKAGE'));
+  await assert.rejects(f.payments.checkout('other', result.id), fail('INVOICE_ACCESS_DENIED'));
+  const checkout = await f.payments.checkout('bride', result.id);
+  assert.equal(checkout.amountCents, 270000);
+  const paid = await f.payments.refresh('bride', result.id);
+  assert.equal(paid.state, 'SandboxPaid');
+  assert.equal((await f.service.selections('bride')).selections[0].invoice.invoiceNo, 'TEST-RECEIPT');
+  assert.equal(f.store.data.get(`appointments/${a.appointmentId}`).status, 'Confirmed');
+});
+test('HTTP package endpoints authenticate, reject cross-account book and preserve fixed quote contract', async () => {
+  const f = await fixture();
+  const server = createServer(createHandler({ service: f.payments, packages: f.service, verifyToken: async token => { if (!['bride', 'manager', 'staff', 'other'].includes(token)) throw Error(); return { uid: token }; } }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  async function req(path, uid, body) { return fetch(origin + path, { method: body ? 'POST' : 'GET', headers: { ...(uid ? { Authorization: `Bearer ${uid}` } : {}), 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) }); }
+  try {
+    assert.equal((await req('/v1/packages')).status, 401);
+    assert.equal((await req('/v1/package-gown-limit')).status, 401);
+    assert.equal((await req('/v1/package-gown-limit', 'staff')).status, 403);
+    assert.deepEqual(await (await req('/v1/package-gown-limit', 'manager')).json(), {maxGowns: 0});
+    assert.equal((await req('/v1/packages', 'bride')).status, 200);
+    const selected = await (await req('/v1/package-selections', 'bride', f.input)).json();
+    assert.equal((await req(`/v1/package-selections/${selected.id}/book`, 'other', booking())).status, 403);
+    assert.equal((await req('/v1/packages', 'bride', initialPackage())).status, 403);
+    assert.equal((await req('/v1/packages', 'staff', {...initialPackage(),revision:1})).status,403);
+    assert.equal((await req('/v1/packages/essential/delete', 'staff', {revision:1})).status,403);
+    assert.equal((await req('/v1/packages/essential/delete', 'manager', {revision:1})).status,409);
+    assert.equal((await req('/v1/packages/essential/delete', undefined, {revision:1})).status,401);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});

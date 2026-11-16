@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "sample": true,
+  "rentalDays": 3,
+  "items": [
+    {
+      "id": "ring-solitaire",
+      "name": "Luna Solitaire Ring",
+      "category": "Rings",
+      "priceCents": 2000,
+      "size": "Adjustable open band · suggested fit US 6–8",
+      "material": "Silver-tone alloy; clear imitation crystal",
+      "description": "A minimal finishing touch for a modern bridal look.",
+      "image": "assets/images/accessory-ring-solitaire.png"
+    },
+    {
+      "id": "ring-halo",
+      "name": "Aurora Halo Ring",
+      "category": "Rings",
+      "priceCents": 3500,
+      "size": "Adjustable open band · suggested fit US 6–8",
+      "material": "Silver-tone alloy; oval imitation crystal",
+      "description": "A statement oval centre framed by a delicate crystal halo.",
+      "image": "assets/images/accessory-ring-halo.png"
+    },
+    {
+      "id": "necklace-pearl",
+      "name": "Belle Pearl Pendant",
+      "category": "Necklaces",
+      "priceCents": 2500,
+      "size": "Suggested chain length 40 + 5 cm",
+      "material": "Silver-tone alloy; imitation pearl",
+      "description": "A simple pendant to pair with a sweetheart or V neckline.",
+      "image": "assets/images/accessory-necklace-pearl.png"
+    },
+    {
+      "id": "necklace-teardrop",
+      "name": "Dewdrop Crystal Necklace",
+      "category": "Necklaces",
+      "priceCents": 3500,
+      "size": "Suggested chain length 42 + 5 cm",
+      "material": "Silver-tone alloy; clear imitation crystal",
+      "description": "A light-catching teardrop for a clean, elegant neckline.",
+      "image": "assets/images/accessory-necklace-teardrop.png"
+    },
+    {
+      "id": "necklace-floral",
+      "name": "Florence Floral Necklace",
+      "category": "Necklaces",
+      "priceCents": 6000,
+      "size": "Suggested chain length 40 + 7 cm",
+      "material": "Silver-tone alloy; imitation crystals",
+      "description": "A floral statement necklace for a strapless gown.",
+      "image": "assets/images/accessory-necklace-floral.png"
+    },
+    {
+      "id": "earrings-pearl",
+      "name": "Belle Pearl Drop Earrings",
+      "category": "Earrings",
+      "priceCents": 2000,
+      "size": "One pair · suggested drop 3 cm · pierced ears",
+      "material": "Silver-tone alloy; imitation pearls",
+      "description": "Soft pearl-style drops to coordinate with the Belle pendant.",
+      "image": "assets/images/accessory-earrings-pearl.png"
+    },
+    {
+      "id": "hair-comb",
+      "name": "Willow Pearl Hair Comb",
+      "category": "Headpieces",
+      "priceCents": 3000,
+      "size": "One comb · suggested width 9 cm",
+      "material": "Silver-tone alloy; imitation pearls",
+      "description": "A delicate leafy comb for an updo or half-up hairstyle.",
+      "image": "assets/images/accessory-hair-comb.png"
+    },
+    {
+      "id": "tiara",
+      "name": "Celeste Crystal Tiara",
+      "category": "Headpieces",
+      "priceCents": 5500,
+      "size": "One tiara · suggested height 4 cm",
+      "material": "Silver-tone alloy; imitation crystals",
+      "description": "A subtle crown silhouette for a classic princess look.",
+      "image": "assets/images/accessory-tiara.png"
+    },
+    {
+      "id": "bracelet",
+      "name": "Stella Crystal Bracelet",
+      "category": "Bracelets",
+      "priceCents": 2500,
+      "size": "Suggested length 16 + 4 cm",
+      "material": "Silver-tone alloy; imitation crystals",
+      "description": "A slim crystal-style bracelet to complete your accessories.",
+      "image": "assets/images/accessory-bracelet.png"
+    },
+    {
+      "id": "veil-short",
+      "name": "Grace Fingertip Veil",
+      "category": "Veils",
+      "priceCents": 8000,
+      "size": "One veil with comb · suggested length 100 cm",
+      "material": "Ivory tulle; satin-style edge",
+      "description": "A light fingertip silhouette for an understated bridal look.",
+      "image": "assets/images/accessory-veil-short.png"
+    },
+    {
+      "id": "veil-long",
+      "name": "Amara Cathedral Veil",
+      "category": "Veils",
+      "priceCents": 13000,
+      "size": "One veil with comb · suggested length 300 cm",
+      "material": "Ivory tulle; floral lace-style border",
+      "description": "A long flowing train for a formal ceremony.",
+      "image": "assets/images/accessory-veil-long.png"
+    }
+  ]
+}

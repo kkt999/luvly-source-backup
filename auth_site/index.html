@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Reset your password · Luvly</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/reset.mjs"></script>
+</head>
+<body>
+  <main>
+    <div class="brand" aria-label="Luvly">Luvly</div>
+    <p class="eyebrow">YOUR FOREVER STARTS HERE</p>
+    <h1>Reset your password</h1>
+    <p id="status" role="status" aria-live="polite">Checking your secure email link…</p>
+    <button id="retry" type="button" hidden>Try again</button>
+    <form id="reset-form" hidden novalidate>
+      <p id="account"></p>
+      <label for="password">New password</label>
+      <div class="password-field">
+        <input id="password" type="password" autocomplete="new-password" maxlength="128" required aria-describedby="requirements">
+        <button type="button" id="show-password" aria-controls="password" aria-pressed="false">Show</button>
+      </div>
+      <ul id="requirements" aria-label="Password requirements"></ul>
+      <label for="confirmation">Confirm new password</label>
+      <div class="password-field">
+        <input id="confirmation" type="password" autocomplete="new-password" maxlength="128" required>
+        <button type="button" id="show-confirmation" aria-controls="confirmation" aria-pressed="false">Show</button>
+      </div>
+      <p id="error" role="alert"></p>
+      <button id="submit" class="primary" type="submit">Save new password</button>
+      <p class="hint">Use a unique password. Avoid names, birthdays and common patterns.</p>
+    </form>
+    <p id="return-note" class="hint">After resetting, return to the Luvly app and sign in with your new password.</p>
+    <noscript>Enable JavaScript to securely verify your reset link and set a new password.</noscript>
+  </main>
+</body>
+</html>

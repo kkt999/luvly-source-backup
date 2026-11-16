@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "provider": "Gemini",
+  "model": "gemini-3.5-flash-lite",
+  "apiKey": "",
+  "freeTierProjectConfirmed": false,
+  "dailyRequestLimit": 10,
+  "perUserDailyLimit": 5
+}

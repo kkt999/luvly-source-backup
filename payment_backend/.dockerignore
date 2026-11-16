@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!*.mjs
+!accessory-catalogue.json
+!guide.json
+*.test.mjs
+configure_endpoint.mjs
+publish_endpoint.mjs
+deploy_*.mjs
+seed_*.mjs
+check_*.mjs

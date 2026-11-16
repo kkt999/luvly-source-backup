@@ -1,0 +1,50 @@
+name: luvly_app
+description: "Luvly unified bride mobile UI and staff/manager web portal."
+publish_to: 'none'
+version: 0.1.0+2137
+
+environment:
+  sdk: ^3.10.7
+
+dependencies:
+  camera: ^0.11.2
+  cloud_firestore: ^6.10.0
+  firebase_auth: ^6.7.0
+  firebase_core: ^4.15.0
+  google_sign_in: ^7.2.0
+  file_selector: ^1.1.0
+  image: ^4.8.0
+  video_player: ^2.11.1
+  pdf: ^3.11.3
+  flutter:
+    sdk: flutter
+  web: ^1.1.1
+  http: ^1.6.0
+  stream_transform: ^2.1.2
+  url_launcher: ^6.3.2
+
+dev_dependencies:
+  video_player_platform_interface: ^6.9.0
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/models/
+    - assets/support/
+    - assets/legal/
+  fonts:
+    - family: LuvlySans
+      fonts:
+        - asset: assets/fonts/roboto-regular.ttf
+        - asset: assets/fonts/roboto-medium.ttf
+          weight: 500
+        - asset: assets/fonts/roboto-bold.ttf
+          weight: 700
+    - family: LuvlySerif
+      fonts:
+        - asset: assets/fonts/CormorantGaramond.ttf
+

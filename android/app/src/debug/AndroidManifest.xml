@@ -1,0 +1,34 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The INTERNET permission is required for development. Specifically,
+         the Flutter tool needs it to communicate with the running application
+         to allow setting breakpoints, to provide hot reload, etc.
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application>
+        <activity android:name=".ar.UpperBodyFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.SkirtDrapeFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.AppearanceFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.ProfileModelProbeActivity" android:exported="true" />
+        <activity android:name=".ar.FramePreparationFixtureActivity" android:exported="true" />
+        <activity android:name=".ar.PosePerformanceFixtureActivity" android:exported="true" />
+        <activity android:name=".ar.PoseRenderBenchmarkActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.TargetLockFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.GownViewerFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.DressSwitchFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.SpatialRegistrationFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.TrackingStabilityFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".ar.ArmSegmenterFixtureActivity" android:exported="true" />
+        <activity android:name=".ar.ArFixtureActivity" android:exported="true" />
+        <activity android:name=".ar.TryOnFlowFixtureActivity" android:exported="true"
+            android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+</manifest>

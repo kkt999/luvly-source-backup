@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#faf6f2">
+  <title>Bridal makeup preview · Luvly</title>
+  <link rel="stylesheet" href="./makeup.css">
+  <script type="importmap">
+    {"imports":{"open-makeup-sdk":"./sdk/index.js","three":"./three/build/three.module.js","three/examples/jsm/":"./three/examples/jsm/"}}
+  </script>
+  <script defer src="./face-mesh/face_mesh.js"></script>
+  <script type="module" src="./makeup.js"></script>
+</head>
+<body>
+  <main>
+    <header><span class="brand">Luvly</span><span class="eyebrow">The bridal edit</span></header>
+    <h1>Bridal makeup preview</h1>
+    <p class="intro">See how three bridal looks feel on you in natural light.</p>
+    <div class="mirror" data-live="false">
+      <video id="camera" playsinline muted aria-hidden="true"></video>
+      <canvas id="mirror" aria-label="Live camera mirror"></canvas>
+      <div class="framing-guide" aria-hidden="true" hidden>
+        <span>Keep both eyes and your lips in view</span>
+      </div>
+      <div class="cover">
+        <span class="mirror-icon" aria-hidden="true">✧</span>
+        <p>Your makeup mirror</p>
+        <button id="start" type="button">Start camera</button>
+      </div>
+    </div>
+    <div class="camera-controls">
+      <p id="status" role="status">Your camera image stays in this browser.</p>
+      <button id="reload" type="button" hidden>Reload preview</button>
+      <button id="stop" type="button" hidden>Stop camera</button>
+    </div>
+    <div class="mirror-actions">
+      <div class="lipstick-control">
+        <label for="lipstick-shade">Lipstick shade</label>
+        <span id="lipstick-swatch" class="swatch" style="--swatch:#a33a59" aria-hidden="true"></span>
+        <select id="lipstick-shade">
+          <option value="">Use look’s shade</option>
+          <option value="#bd7257">Peach Nude</option>
+          <option value="#8d394b">Rosewood</option>
+          <option value="#84466b">Dusty Mauve</option>
+          <option value="#9c332c">Brick Red</option>
+          <option value="#b31c36">Classic Red</option>
+          <option value="#5e2043">Deep Plum</option>
+        </select>
+      </div>
+      <button id="compare" type="button" aria-pressed="false">Show bare face</button>
+    </div>
+    <section aria-labelledby="looks-title">
+      <h2 id="looks-title">Choose a look</h2>
+      <div class="looks">
+        <button class="look" data-look="rose" aria-pressed="true" type="button">
+          <span class="swatch" style="--swatch:#a33a59" aria-hidden="true"></span>Soft Rose
+        </button>
+        <button class="look" data-look="peach" aria-pressed="false" type="button">
+          <span class="swatch" style="--swatch:#c56742" aria-hidden="true"></span>Peach Glow
+        </button>
+        <button class="look" data-look="berry" aria-pressed="false" type="button">
+          <span class="swatch" style="--swatch:#671839" aria-hidden="true"></span>Classic Berry
+        </button>
+      </div>
+      <p id="description">Rose lips, a soft pink flush and a neutral wash on the eyes.</p>
+      <div class="look-controls">
+        <label for="layer">Preview
+          <select id="layer">
+            <option value="all">Full look</option>
+            <option value="lipstick">Lipstick only</option>
+            <option value="blush">Blush only</option>
+            <option value="eyeshadow">Eyeshadow only</option>
+          </select>
+        </label>
+      </div>
+    </section>
+    <footer>Virtual colour preview · Powered by OpenMakeupSDK</footer>
+  </main>
+</body>
+</html>

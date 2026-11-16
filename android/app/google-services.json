@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "127519727979",
+    "project_id": "luvly-44c77",
+    "storage_bucket": "luvly-44c77.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:127519727979:android:783288aa774b6e65a12c2e",
+        "android_client_info": {
+          "package_name": "com.luvly.luvly_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "127519727979-dh61667k7vtsbmvenh42jrf316sd82vk.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.luvly.luvly_app",
+            "certificate_hash": "fc9b5a3122a8df12242212186b6f1f868f30c02d"
+          }
+        },
+        {
+          "client_id": "127519727979-1ehuj2i6k2fi4v4hbd901e4mnse3hm16.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDaufFb8JluPXxZl6dvnYw-DNVilpyef98"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "127519727979-1ehuj2i6k2fi4v4hbd901e4mnse3hm16.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

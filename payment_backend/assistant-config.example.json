@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "provider": "DialogflowES",
+  "projectId": "luvly-44c77",
+  "freeTierProjectConfirmed": false,
+  "dailyRequestLimit": 20,
+  "perUserDailyLimit": 10
+}
