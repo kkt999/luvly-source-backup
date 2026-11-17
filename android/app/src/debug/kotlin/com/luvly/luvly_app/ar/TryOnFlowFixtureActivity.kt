@@ -15,10 +15,19 @@ class TryOnFlowFixtureActivity: TryOnActivity() {
     private var actionsStartedAt=0L
     private var timerStartedWithoutPose=false
     private var usedSpatialRegistration=false
+    private var enabledSamples=0
+    private var disabledAfterFirstFrame=0
+    private val slowFrames get()=intent.getBooleanExtra("fixtureSlowFrames",false)
     override fun onCreate(savedInstanceState: Bundle?) {
         val model=ArDressCatalogue.byId(intent.getStringExtra("fixtureDress") ?: "princess-wedding")!!
-        intent.putExtra("dressId",model.id)
-        intent.putExtra("modelAsset",model.asset)
+        if(intent.getBooleanExtra("fixtureGenerated",false)) {
+            val buffer=DressRenderer.readModel(this,model.asset)
+            val bytes=ByteArray(buffer.remaining()).also { buffer.get(it) }
+            intent.putExtras(GeneratedDressFile.stage(this,"fixture-gown","Generated test gown",bytes))
+        } else {
+            intent.putExtra("dressId",model.id)
+            intent.putExtra("modelAsset",model.asset)
+        }
         super.onCreate(savedInstanceState)
     }
     override fun beginCameraExperience() {
@@ -70,10 +79,11 @@ class TryOnFlowFixtureActivity: TryOnActivity() {
                     actionsStartedAt>0 && elapsed in 11500..12600
                 val noPose=intent.getBooleanExtra("fixtureNoPose",false) ||
                     (intent.getBooleanExtra("fixtureStepBack",false) && (actionsStartedAt==0L || elapsed<7000))
-                displayCameraFrame(bitmap,if(dropout || noPose) emptyList() else points,armMask=alpha,
+                val capturedAt=SystemClock.uptimeMillis()-(if(slowFrames)450L else 0L)
+                displayCameraFrame(bitmap,if(dropout || noPose) emptyList() else points,capturedAt,armMask=alpha,
                     world=if(dropout || noPose)emptyList() else world,projection=projection)
                 if(spatialPoseProbe()!=null)usedSpatialRegistration=true
-                handler.postDelayed(this,100)
+                handler.postDelayed(this,if(slowFrames)500 else 100)
             }
         })
         handler.post(object: Runnable {
@@ -88,6 +98,14 @@ class TryOnFlowFixtureActivity: TryOnActivity() {
     }
     private fun exerciseActions(store: LookStore) {
         actionsStartedAt=SystemClock.uptimeMillis()
+        if(slowFrames)handler.post(object: Runnable {
+            override fun run() {
+                if(!alive || SystemClock.uptimeMillis()-actionsStartedAt>=2150)return
+                if(button("Take photo")?.isEnabled==true)enabledSamples++
+                else if(enabledSamples>0)disabledAfterFirstFrame++
+                handler.postDelayed(this,50)
+            }
+        })
         handler.postDelayed({
             val preview=button("Take photo")
             timerStartedWithoutPose=preview?.isEnabled==true && intent.getBooleanExtra("fixtureStepBack",false)
@@ -96,11 +114,15 @@ class TryOnFlowFixtureActivity: TryOnActivity() {
         if(intent.getBooleanExtra("fixtureCancel",false))
             handler.postDelayed({ button("Cancel timer")?.performClick() },4000)
         handler.postDelayed({ captureWindow("ar_flow_preview.png") },13000)
-        handler.postDelayed({ button("Save look")?.performClick() },17500)
+        if(!slowFrames)handler.postDelayed({ button("Save look")?.performClick() },17500)
         handler.postDelayed({
             val made=store.list().filter { it.id !in before }
             File(filesDir,"ar_flow_result.txt").writeText("Model: ${intent.getStringExtra("dressId")}\nDropout: ${intent.getBooleanExtra("fixtureDropout",false)}\nStep back: ${intent.getBooleanExtra("fixtureStepBack",false)}\nTimer allowed before pose: $timerStartedWithoutPose\nNo pose: ${intent.getBooleanExtra("fixtureNoPose",false)}\nCancel: ${intent.getBooleanExtra("fixtureCancel",false)}\nArms: ${intent.getBooleanExtra("fixtureArms",false)}\nCompleted: ${System.currentTimeMillis()}\nSaved new looks: ${made.size}\n")
             File(filesDir,"ar_flow_result.txt").appendText("Spatial registration: $usedSpatialRegistration\n")
+            if(slowFrames)File(filesDir,"ar_flow_result.txt").appendText(
+                "Slow camera frames · Build ${com.luvly.luvly_app.BuildConfig.VERSION_CODE}\n"+
+                    "Enabled samples: $enabledSamples\nDisabled between frames: $disabledAfterFirstFrame\n"+
+                    "Photo frozen: ${button("Resume live")?.isEnabled==true}\n")
             // Preserve QA evidence separately, not as a fake customer album entry.
             made.singleOrNull()?.let {
                 File(it.path).copyTo(File(filesDir,"ar_flow_saved.png"),overwrite=true)

@@ -595,6 +595,7 @@ class PackagePriceBreakdown extends StatelessWidget {
     required this.removed,
     required this.addons,
     this.accessoryExtraCents = 0,
+    this.veilUpgradeCents = 0,
     this.accessoryValueCents = 0,
     this.showPaymentEstimate = true,
     this.datesChecked = false,
@@ -603,6 +604,7 @@ class PackagePriceBreakdown extends StatelessWidget {
   final BridalPackage package;
   final Set<String> removed, addons;
   final int accessoryExtraCents;
+  final int veilUpgradeCents;
   final int accessoryValueCents;
   @override
   Widget build(BuildContext context) {
@@ -621,8 +623,23 @@ class PackagePriceBreakdown extends StatelessWidget {
           for (final s in package.services.where((s) => removed.contains(s.id)))
             _row('Remove ${s.name}', '− ${packageMoney(s.priceCents)}'),
           for (final s in package.services.where((s) => addons.contains(s.id)))
-            _row(s.name, '+ ${packageMoney(s.priceCents)}'),
-          if (accessoryValueCents > 0) ...[
+            if (!s.itemPriced) _row(s.name, '+ ${packageMoney(s.priceCents)}'),
+          if (package.services.any((s) => s.itemPriced || s.packageVeil)) ...[
+            for (final service in package.services.where(
+              (s) =>
+                  s.packageVeil &&
+                  s.kind != 'Add-on' &&
+                  !removed.contains(s.id),
+            ))
+              _row(service.name, 'Included'),
+            if (veilUpgradeCents > 0)
+              _row('Veil upgrade', '+ ${packageMoney(veilUpgradeCents)}'),
+            if (accessoryExtraCents > veilUpgradeCents)
+              _row(
+                'Accessory subtotal',
+                '+ ${packageMoney(accessoryExtraCents - veilUpgradeCents)}',
+              ),
+          ] else if (accessoryValueCents > 0) ...[
             const Divider(height: 24),
             _row('Selected accessories', packageMoney(accessoryValueCents)),
             _row(

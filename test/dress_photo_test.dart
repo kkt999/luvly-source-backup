@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:luvly_app/admin/live_inventory.dart';
+import 'package:luvly_app/admin/dress_ar_dialog.dart';
 import 'package:luvly_app/catalogue/catalogue_repository.dart';
 import 'package:luvly_app/catalogue/catalogue_widgets.dart';
 import 'package:luvly_app/catalogue/dress_photo_data.dart';
@@ -128,7 +129,7 @@ void main() {
     WidgetTester tester,
     FakeCatalogue repo,
     Future<XFile?> Function() pick, {
-    CatalogueDress? dress,
+    bool creating = false,
   }) async {
     tester.view.physicalSize = const Size(1000, 2200);
     tester.view.devicePixelRatio = 1;
@@ -140,7 +141,7 @@ void main() {
         home: DressEditor(
           repository: repo,
           actorUid: 'manager',
-          dress: dress ?? sampleDress(),
+          dress: creating ? null : sampleDress(),
           pickPhoto: pick,
         ),
       ),
@@ -148,8 +149,11 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> select(WidgetTester tester) async {
-    await tester.tap(find.text('Replace photo'));
+  Future<void> select(
+    WidgetTester tester, [
+    String button = 'Replace photo',
+  ]) async {
+    await tester.tap(find.text(button));
     await tester.pump(const Duration(milliseconds: 50));
     // Allow compute's real isolate to complete outside the widget-test fake clock.
     await tester.runAsync(() async {
@@ -165,10 +169,7 @@ void main() {
     await editor(tester, repo, () async => null);
     await select(tester);
     expect(find.text('Replace photo'), findsOneWidget);
-    expect(
-      find.text('New photo · saved when you select Save Dress'),
-      findsNothing,
-    );
+    expect(find.text('New photo · saved with the dress'), findsNothing);
     expect(repo.saves, 0);
     expect(find.text('Photo link (HTTPS)'), findsNothing);
   });
@@ -200,19 +201,13 @@ void main() {
             XFile.fromData(fixture(), path: 'dress.png', name: 'dress.png'),
       );
       await select(tester);
-      expect(
-        find.text('New photo · saved when you select Save Dress'),
-        findsOneWidget,
-      );
+      expect(find.text('New photo · saved with the dress'), findsOneWidget);
       expect(repo.photos, isEmpty);
       await tester.tap(find.text('Save Dress'));
       await tester.pumpAndSettle();
       expect(repo.photos, isEmpty);
       expect(find.text('Synthetic failure'), findsOneWidget);
-      expect(
-        find.text('New photo · saved when you select Save Dress'),
-        findsOneWidget,
-      );
+      expect(find.text('New photo · saved with the dress'), findsOneWidget);
       repo.saveError = null;
       await tester.tap(find.text('Save Dress'));
       await tester.pumpAndSettle();
@@ -236,6 +231,85 @@ void main() {
     expect(find.text('Add a photo before publishing'), findsNothing);
     expect(find.text('Replace photo'), findsOneWidget);
   });
+
+  Future<void> fillNewDress(WidgetTester tester) async {
+    await tester.enterText(find.byType(TextFormField).at(0), 'Test satin gown');
+    await tester.enterText(find.byType(TextFormField).at(1), '899');
+    await tester.enterText(
+      find.byType(TextFormField).at(2),
+      'A satin gown with a full skirt and a sweetheart neckline.',
+    );
+    await tester.tap(
+      find.widgetWithText(DropdownButtonFormField<String>, 'Colour'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Ivory').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'M'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('Add Dress saves directly with AR try-on off by default', (
+    tester,
+  ) async {
+    final repo = FakeCatalogue();
+    await editor(tester, repo, () async => null, creating: true);
+    final toggle = find.widgetWithText(SwitchListTile, 'AR try-on');
+    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+    expect(find.text('AR model (optional)'), findsNothing);
+    expect(find.text('Save & manage 3D try-on'), findsNothing);
+    await fillNewDress(tester);
+    await tester.tap(find.text('Save Dress'));
+    await tester.pumpAndSettle();
+    expect(repo.records['dress-1']!.arModelId, isEmpty);
+    expect(repo.saves, 1);
+    expect(find.byType(DressArDialog), findsNothing);
+  });
+
+  testWidgets(
+    'Add Dress with AR requires a photo, consent, and a successful save',
+    (tester) async {
+      final repo = FakeCatalogue()..saveError = StateError('Save interrupted');
+      await editor(
+        tester,
+        repo,
+        () async =>
+            XFile.fromData(fixture(), path: 'dress.png', name: 'dress.png'),
+        creating: true,
+      );
+      await fillNewDress(tester);
+      await tester.tap(find.widgetWithText(SwitchListTile, 'AR try-on'));
+      await tester.pumpAndSettle();
+      final start = find.text('Save & generate AR');
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      expect(find.text('Upload a photo to generate AR try-on'), findsOneWidget);
+      expect(repo.saves, 0);
+      await select(tester, 'Upload photo');
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('about 30 Tripo API credits'), findsOneWidget);
+      await tester.tap(find.text('Cancel').last);
+      await tester.pumpAndSettle();
+      expect(repo.saves, 0);
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save & generate'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save interrupted'), findsOneWidget);
+      expect(find.byType(DressArDialog), findsNothing);
+      repo.saveError = null;
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save & generate'));
+      await tester.pumpAndSettle();
+      final dialog = tester.widget<DressArDialog>(find.byType(DressArDialog));
+      expect(dialog.generateOnOpen, isTrue);
+      expect(dialog.dressId, 'dress-1');
+      expect(dialog.photoRevision, 1);
+      expect(repo.photos['dress-1'], isNotNull);
+    },
+  );
   testWidgets(
     'Stored photo is displayed and removed from view when access/data disappears',
     (tester) async {

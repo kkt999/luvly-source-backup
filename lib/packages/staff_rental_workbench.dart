@@ -623,9 +623,16 @@ Widget _rentalItems(
         subtitle: Text('${a['category']} · ${a['size']}'),
       ),
     for (final charge in selection.data['accessoryCharges'] as List? ?? [])
-      Text(
-        '${charge['serviceName']}: allowance ${packageMoney(charge['appliedAllowanceCents'])} · extra ${packageMoney(charge['extraCents'])}',
-      ),
+      Text(switch (charge['pricing']) {
+        'per-item' =>
+          '${charge['serviceName']} · ${packageMoney(charge['extraCents'])}',
+        'package' =>
+          (charge['extraCents'] as int? ?? 0) > 0
+              ? 'Veil upgrade · + ${packageMoney(charge['extraCents'])}'
+              : '${charge['serviceName']} · Included',
+        _ =>
+          '${charge['serviceName']}: allowance ${packageMoney(charge['appliedAllowanceCents'])} · extra ${packageMoney(charge['extraCents'])}',
+      }),
     if (services) ...[
       const Divider(height: 28),
       const Text(

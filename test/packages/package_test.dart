@@ -65,6 +65,16 @@ const bridal = BridalPackage(
   ],
 );
 
+final packageWithoutAccessories = BridalPackage(
+  id: bridal.id,
+  name: bridal.name,
+  description: bridal.description,
+  revision: bridal.revision,
+  basePriceCents: bridal.basePriceCents,
+  active: true,
+  services: bridal.services.where((s) => !s.isAccessory).toList(),
+);
+
 class FakePackages implements PackageApi, PackageGownLimitApi {
   @override
   bool get configured => true;
@@ -152,6 +162,65 @@ Future<void> tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets(
+    'Manager loads approved pricing into the editor without publishing',
+    (tester) async {
+      final original = BridalPackage.fromJson({
+        ...bridal.toJson(),
+        'id': 'signature-bridal',
+        'name': 'Signature Bridal',
+        'includedGownCount': 1,
+        'eligibleDressIds': ['gown1'],
+        'basePriceCents': 179900,
+      });
+      final approved = {
+        ...original.toJson(),
+        'basePriceCents': 172900,
+        'services': [
+          original.services.first.toJson(),
+          const PackageServiceItem(
+            id: 'veil-rental',
+            name: 'Veil Rental',
+            description: 'Standard veil included.',
+            kind: 'Optional',
+            priceCents: 8000,
+            serviceType: PackageServiceType.packageVeil,
+            standardVeilId: 'veil-short',
+          ).toJson(),
+        ],
+      };
+      final requests = <http.Request>[];
+      final api = HttpPackageApi(
+        transport: HttpPaymentApi(
+          baseUrl: 'https://example.com',
+          token: () async => 'manager',
+          client: MockClient((request) async {
+            requests.add(request);
+            if (request.url.path.endsWith('/approved-pricing')) {
+              return http.Response(jsonEncode(approved), 200);
+            }
+            return http.Response('{"maxGowns":4}', 200);
+          }),
+        ),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PackageEditor(api: api, package: original),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('Load approved pricing'));
+      final field = find.widgetWithText(TextFormField, 'Standard price');
+      expect(tester.widget<TextFormField>(field).controller!.text, '1729.00');
+      expect(requests.where((r) => r.method == 'POST'), isEmpty);
+      expect(
+        requests.where((r) => r.url.path.endsWith('/approved-pricing')),
+        hasLength(1),
+      );
+    },
+  );
+
   testWidgets('appointment shortcut focuses the correct package selection', (
     tester,
   ) async {
@@ -428,7 +497,10 @@ void main() {
       final api = FakePackages()..fail = true;
       await tester.pumpWidget(
         MaterialApp(
-          home: PackageChoiceScreen(package: bridal, api: api),
+          home: PackageChoiceScreen(
+            package: packageWithoutAccessories,
+            api: api,
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -445,7 +517,10 @@ void main() {
       final api = FakePackages();
       await tester.pumpWidget(
         MaterialApp(
-          home: PackageChoiceScreen(package: bridal, api: api),
+          home: PackageChoiceScreen(
+            package: packageWithoutAccessories,
+            api: api,
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -480,7 +555,7 @@ void main() {
                 onPressed: () => Navigator.of(context).push<void>(
                   MaterialPageRoute(
                     builder: (_) => PackageChoiceScreen(
-                      package: bridal,
+                      package: packageWithoutAccessories,
                       api: FakePackages(),
                     ),
                   ),
@@ -498,7 +573,11 @@ void main() {
       final firstPosition = tester.getRect(bar);
       expect(tester.getBottomRight(button).dy, lessThanOrEqualTo(612));
       final details = find.text('Payment details');
-      await tester.scrollUntilVisible(details, 160);
+      await tester.scrollUntilVisible(
+        details,
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), firstPosition);
       expect(
@@ -558,7 +637,7 @@ void main() {
       },
     ];
     await tapVisible(tester, find.text('Issue package invoice'));
-    expect(find.text('Issue invoice · RM 2500.00'), findsOneWidget);
+    expect(find.text('Issue invoice · RM 2,500.00'), findsOneWidget);
     expect(api.invoicesIssued, 0);
     await tester.tap(find.textContaining('Confirm invoice for'));
     await tester.pumpAndSettle();
@@ -677,11 +756,11 @@ void main() {
 
       await selectCategory(PackageServiceType.makeupHair, add: true);
       expect(find.text('View jewellery'), findsNothing);
-      await selectCategory(PackageServiceType.jewellery);
+      await selectCategory(PackageServiceType.itemAccessories);
       final nameField = find.widgetWithText(TextFormField, 'Service name');
       expect(
         tester.widget<TextFormField>(nameField).controller!.text,
-        'Jewellery & accessories',
+        'Bridal Accessories',
       );
       await tester.enterText(nameField, 'My wedding accessories');
       await tester.pumpAndSettle();
@@ -691,7 +770,7 @@ void main() {
       expect(find.text('Grace Fingertip Veil'), findsNothing);
       await tester.tap(find.text('Done'));
       await tester.pumpAndSettle();
-      await selectCategory(PackageServiceType.veil);
+      await selectCategory(PackageServiceType.packageVeil);
       expect(
         tester.widget<TextFormField>(nameField).controller!.text,
         'My wedding accessories',

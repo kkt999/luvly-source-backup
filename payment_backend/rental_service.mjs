@@ -81,6 +81,26 @@ export class RentalService {
     const r=await this.store.get(`rentals/${id}`);
     requireValue(r&&(role==='staff'||r.uid===uid),'RENTAL_NOT_FOUND',404);return r;
   }
+  async deleteDress(uid, dressId, input) {
+    requireValue(idValid(dressId) && exact(input, ['revision']) &&
+      Number.isSafeInteger(input.revision) && input.revision > 0, 'INVALID_DRESS_DELETE');
+    return this.store.atomic(async tx => {
+      const staff = await tx.get(`staff/${uid}`);
+      requireValue(staff?.active === true && staff.role === 'manager', 'MANAGER_REQUIRED', 403);
+      const path = `dresses/${dressId}`;
+      const dress = await tx.get(path);
+      if (!dress) return { deleted: true };
+      requireValue(dress.revision === input.revision, 'DRESS_DELETE_CHANGED', 409);
+      const references = await tx.dressDeletionState(dressId);
+      requireValue(!references.inUse, 'DRESS_IN_USE', 409);
+      requireValue(!references.arInUse, 'DRESS_AR_IN_USE', 409);
+      tx.delete(path);
+      tx.delete(`dressPhotos/${dressId}`);
+      for (const id of references.variantIds) tx.delete(`rentalVariants/${id}`);
+      for (const id of references.failedArJobIds) tx.delete(`dressArJobs/${dressId}/photos/${id}`);
+      return { deleted: true };
+    });
+  }
   async variants(uid, dressId) {
     const role = await this.access(uid);
     requireValue(idValid(dressId), 'INVALID_VARIANT');

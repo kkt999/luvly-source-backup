@@ -1,4 +1,6 @@
-import { priceAccessories, accessoryCatalogue } from './accessory_catalogue.mjs';
+import { accessoryPricing } from './package_service_types.mjs';
+import { priceAccessories, accessoryCatalogue, accessoryService, standardVeilFor } from './accessory_catalogue.mjs';
+import { approvedPackagePricing } from './approved_package_pricing.mjs';
 import {fittingBeforeRental,fittingFitsRental,effectiveVisitTime,malaysiaDay} from './booking_dates.mjs';
 import {packageDates} from './package_rentals.mjs';
 import {stockStatus,requireSelectedAvailability} from './rental_availability.mjs';
@@ -49,7 +51,8 @@ async function unusedFittingCredit(reader, uid, appointmentId, visit, plan, now)
 }
 
 export function validatePackage(input) {
-  ensure(keys(input, ['id', 'revision', 'name', 'description', 'basePriceCents', 'services', 'active', 'includedGownCount', 'eligibleDressIds', 'allCatalogueGowns']), 'INVALID_PACKAGE');
+  ensure(keys(input, ['id', 'revision', 'name', 'description', 'basePriceCents', 'services', 'active', 'includedGownCount', 'eligibleDressIds', 'allCatalogueGowns', 'accessoryPricingApproved']) &&
+    (input.accessoryPricingApproved === undefined || input.accessoryPricingApproved === true), 'INVALID_PACKAGE');
   const count = input.includedGownCount ?? 0, eligible = input.eligibleDressIds ?? [];
   ensure(Number.isInteger(count) && count >= 0 && count <= MAX_PACKAGE_GOWNS && Array.isArray(eligible) && eligible.length <= 100 &&
     eligible.every(validId) && new Set(eligible).size === eligible.length &&
@@ -62,10 +65,17 @@ export function validatePackage(input) {
   const ids = new Set(), names = new Set();
   let removable = 0;
   for (const s of input.services) {
-    ensure(keys(s, ['id', 'name', 'description', 'kind', 'priceCents', 'serviceType', 'accessoryAllowanceCents']) && validId(s.id) && text(s.name, 2, 100) &&
+    ensure(keys(s, ['id', 'name', 'description', 'kind', 'priceCents', 'serviceType', 'accessoryAllowanceCents', 'standardVeilId']) && validId(s.id) && text(s.name, 2, 100) &&
       text(s.description, 0, 300) && ['Required', 'Optional', 'Add-on'].includes(s.kind) && amount(s.priceCents), 'INVALID_PACKAGE_SERVICES');
     ensure(s.serviceType === undefined || packageServiceTypes.has(s.serviceType), 'INVALID_PACKAGE_SERVICES');
-    if (s.serviceType !== undefined && requiresAccessorySelection(s)) {
+    if (s.standardVeilId !== undefined) {
+      ensure(s.serviceType === 'package-veil' && s.kind !== 'Add-on' && standardVeilFor(s),
+        'INVALID_PACKAGE_ACCESSORY_PRICING');
+    }
+    if (accessoryPricing(s) === 'per-item') {
+      ensure(s.kind === 'Add-on' && s.priceCents === 0, 'INVALID_PACKAGE_ACCESSORY_PRICING');
+    }
+    if (s.serviceType !== undefined && requiresAccessorySelection(s) && accessoryPricing(s) === 'allowance') {
       ensure(amount(s.accessoryAllowanceCents), 'INVALID_PACKAGE_ACCESSORY_ALLOWANCE');
     } else {
       ensure(s.accessoryAllowanceCents === undefined, 'INVALID_PACKAGE_ACCESSORY_ALLOWANCE');
@@ -74,6 +84,11 @@ export function validatePackage(input) {
     ids.add(s.id); names.add(s.name.toLowerCase());
     if (s.kind === 'Required') ensure(s.priceCents === 0, 'INVALID_PACKAGE_PRICE');
     if (s.kind === 'Optional') removable += s.priceCents;
+  }
+  const accessories = input.services.filter(accessoryService);
+  if (accessories.some(service => accessoryPricing(service) !== 'allowance')) {
+    ensure(accessories.every(service => accessoryPricing(service) !== 'allowance') &&
+      new Set(accessories.map(accessoryPricing)).size === accessories.length, 'INVALID_PACKAGE_ACCESSORY_PRICING');
   }
   ensure(input.services.some(s => s.kind === 'Required'), 'REQUIRED_SERVICE_NEEDED');
   const minimum = input.active && count > 0 ? 200 : 100;
@@ -112,11 +127,13 @@ export class PackageService {
       availability: d.availability, published: true, revision: d.revision, arModelId: d.arModelId ?? '',
     })), limited: rows.length >= 100 };
   }
-  async catalogue(uid, supportsServiceTypes = false) {
+  async catalogue(uid, supportsServiceTypes = false, supportsItemPricing = false, supportsVeilUpgrades = false) {
     const actor = await this.paymentService.access(uid);
     const rows = await this.store.list('servicePackages');
     const packages = rows.filter(p => actor.role !== 'bride' ||
-      (p.active && (supportsServiceTypes || !(p.services ?? []).some(s => s.serviceType !== undefined))))
+      (p.active && (supportsServiceTypes || !(p.services ?? []).some(s => s.serviceType !== undefined)) &&
+        (supportsItemPricing || !(p.services ?? []).some(s => accessoryPricing(s) !== 'allowance')) &&
+        (supportsVeilUpgrades || !(p.services ?? []).some(s => s.standardVeilId !== undefined))))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (actor.role === 'bride' && packages.some(p => p.allCatalogueGowns && p.includedGownCount > 0)) {
       // Earlier customer apps still read a list of eligible IDs from this response.
@@ -124,6 +141,13 @@ export class PackageService {
       return {packages: packages.map(p => p.allCatalogueGowns && p.includedGownCount > 0 ? {...p, eligibleDressIds} : p), limited: rows.length >= 100};
     }
     return {packages, limited: rows.length >= 100};
+  }
+  async approvedPricing(uid, id) {
+    const actor = await this.store.get(`staff/${uid}`);
+    ensure(actor?.active === true && actor.role === 'manager', 'MANAGER_REQUIRED', 403);
+    const row = await this.store.get(`servicePackages/${id}`);
+    const proposal = approvedPackagePricing(row && { ...row, id });
+    return proposal;
   }
   async gownLimit(uid) {
     return this.store.atomic(async tx => {
@@ -150,7 +174,8 @@ export class PackageService {
       }));
       const accessories=await Promise.all(accessoryCatalogue.items.map(async item=>({itemId:item.id,
         status:stockStatus(await tx.get(`accessoryStock/${item.id}`),dates,now)})));
-      return {rentalPlan:input.rentalPlan,checkedAt:now,reserved:false,gowns:gowns.filter(Boolean),accessories};
+      return {rentalPlan:input.rentalPlan,checkedAt:now,reserved:false,gowns:gowns.filter(Boolean),accessories,
+        accessoryCatalogueVersion:accessoryCatalogue.version};
     });
   }
   async save(uid, input) {
@@ -165,6 +190,9 @@ export class PackageService {
       ensure(!current?.allCatalogueGowns || input.allCatalogueGowns === true, 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
       const typedIds = new Set((current?.services ?? []).filter(s => s.serviceType !== undefined).map(s => s.id));
       ensure(input.services.every(s => !typedIds.has(s.id) || s.serviceType !== undefined), 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
+      const standardIds = new Set((current?.services ?? []).filter(s => s.standardVeilId !== undefined).map(s => s.id));
+      ensure(input.services.every(s => !standardIds.has(s.id) || s.standardVeilId !== undefined),
+        'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
       const deactivating = !input.active && current?.active && current.allCatalogueGowns &&
         current.includedGownCount === input.includedGownCount;
       if (input.allCatalogueGowns && input.includedGownCount > 0 && !deactivating) {
@@ -177,7 +205,10 @@ export class PackageService {
         ensure(gowns.length === ids.length, 'PACKAGE_GOWN_UNAVAILABLE', 409);
         ensure(await countStockedGowns(tx, gowns, input.includedGownCount) >= input.includedGownCount, 'PACKAGE_GOWNS_NOT_READY', 409);
       }
-      const next = { ...input, revision: input.revision + 1, createdAt: current?.createdAt ?? this.now(),
+      const { accessoryPricingApproved, ...configuration } = input;
+      if (input.active && input.services.some(s => accessoryPricing(s) !== 'allowance'))
+        ensure(accessoryPricingApproved === true, 'PACKAGE_ACCESSORY_APPROVAL_REQUIRED', 409);
+      const next = { ...configuration, revision: input.revision + 1, createdAt: current?.createdAt ?? this.now(),
         createdBy: current?.createdBy ?? uid, updatedAt: this.now(), updatedBy: uid,
         draft: !input.active && (!current || current.draft === true) };
       tx.set(`servicePackages/${input.id}`, next);
@@ -274,7 +305,7 @@ export class PackageService {
         const invoice = id ? await this.store.get(`sandboxInvoices/${id}`) : null;
         return invoice?.uid === row.uid ? publicInvoice(invoice) : null;
       };
-      return { ...row,...(row.fittingWorkflowVersion===2?fittingPresentation(row):{}),
+      return { ...row,...(row.fittingWorkflowVersion===2?fittingPresentation(row,{includeSchedules:operations}):{}),
       ...(customer ? {fittingQuoteHistory:undefined,selectionHistory:undefined,fittingDecisionHistory:undefined}:{}),
       ...(operations ? {serviceProgress:progress?.rentalId===(row.rentalId??null)?progress:null,
         serviceProgressRevision:progress?.revision??0} : {}),
@@ -352,7 +383,8 @@ export class PackageService {
       ensure(p?.active === true, 'PACKAGE_UNAVAILABLE', 409);
       ensure(p.revision === input.revision, 'PACKAGE_CHANGED', 409);
       const priced = priceSelection(p, input.removedIds, input.addonIds);
-      const accessoryPrice = priceAccessories(priced.services, accessories, input.accessoryCatalogueVersion);
+      const accessoryPrice = priceAccessories(priced.services, accessories, input.accessoryCatalogueVersion,
+        {requireItems: input.rentalPlan !== undefined});
       priced.totalCents += accessoryPrice.accessoryExtraCents;
       ensure(amount(priced.totalCents), 'INVALID_PACKAGE_PRICE');
       if (p.services.some(s => s.serviceType !== undefined)) {
@@ -401,7 +433,8 @@ export class PackageService {
       const p=await tx.get(`servicePackages/${input.packageId??s.packageId}`);
       ensure(p?.active&&p.revision===input.packageRevision,'PACKAGE_CHANGED',409);
       ensure(!switching||p.includedGownCount>0,'PACKAGE_GOWN_COUNT',409);
-      const priced=priceSelection(p,input.removedIds,input.addonIds),accessories=priceAccessories(priced.services,input.accessories,input.accessoryCatalogueVersion);
+      const priced=priceSelection(p,input.removedIds,input.addonIds),accessories=priceAccessories(priced.services,input.accessories,input.accessoryCatalogueVersion,
+        {requireItems: input.rentalPlan !== undefined || s.selectionFlowVersion === 1});
       priced.totalCents+=accessories.accessoryExtraCents;
       ensure(amount(priced.totalCents)&&priced.totalCents>=200,'INVALID_PACKAGE_PRICE');
       ensure(input.gowns.length===(p.includedGownCount??0),'PACKAGE_GOWN_COUNT',409);
@@ -418,7 +451,8 @@ export class PackageService {
       ensure(switching||!s.promotion||promotion,'PROMOTION_UNAVAILABLE',409);
       const totalCents=promotion?.totalCents??priced.totalCents;
       const rentalPlan=input.rentalPlan??s.rentalPlan;
-      if (p.allCatalogueGowns && p.includedGownCount > 0) ensure(rentalPlan, 'INVALID_RENTAL_DATE');
+      if ((p.allCatalogueGowns || p.services.some(s => accessoryPricing(s) !== 'allowance')) &&
+          p.includedGownCount > 0) ensure(rentalPlan, 'INVALID_RENTAL_DATE');
       if(input.rentalPlan!==undefined)ensure(input.planRevision===(s.rentalPlanRevision??0),'RENTAL_PLAN_CHANGED',409);
       if(rentalPlan) {
         const dates=packageDates(priced,rentalPlan,this.now());
@@ -428,7 +462,8 @@ export class PackageService {
             ensure(fittingFitsRental(visit,rentalPlan,this.now()),'FITTING_DATE_CONFLICT',409);
         }
         // Legacy records retain their dates; explicit date-first revisions fail closed.
-        if(input.rentalPlan!==undefined||s.selectionFlowVersion===1||p.allCatalogueGowns)
+        if(input.rentalPlan!==undefined||s.selectionFlowVersion===1||p.allCatalogueGowns||
+          p.services.some(s=>accessoryPricing(s)!=='allowance'))
           await requireSelectedAvailability(tx,{selectedGowns,selectedAccessories:accessories.selectedAccessories},dates,this.now());
       }
       if(input.previewOnly)return {totalCents,subtotalCents:priced.totalCents,promotion,selectedGowns,accessoryExtraCents:accessories.accessoryExtraCents};

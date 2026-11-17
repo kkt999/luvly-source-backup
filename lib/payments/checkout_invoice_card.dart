@@ -265,8 +265,7 @@ class CheckoutInvoiceCard extends StatelessWidget {
     );
   }
 
-  String _amount(int cents) =>
-      staff ? 'RM ${(cents / 100).toStringAsFixed(2)}' : _ringgit(cents);
+  String _amount(int cents) => formatRinggit(cents);
 
   String _amountCaption(PaymentListStatus status) {
     if (invoice.reviewResolution != null) return 'Original amount paid';
@@ -537,19 +536,6 @@ const _financialDigits = TextStyle(
   fontFeatures: [FontFeature.tabularFigures()],
 );
 
-final _thousandsGroups = RegExp(r'(\d)(?=(?:\d{3})+$)');
-
-String _ringgit(int cents) {
-  final whole = (cents ~/ 100).abs().toString();
-  final grouped = whole.replaceAllMapped(
-    _thousandsGroups,
-    (digit) => '${digit[1]},',
-  );
-  final fraction = cents.remainder(100).abs().toString().padLeft(2, '0');
-  final sign = cents < 0 ? '-' : '';
-  return 'RM $sign$grouped.$fraction';
-}
-
 class _PaymentAmount extends StatelessWidget {
   const _PaymentAmount({required this.cents, required this.label});
   final int cents;
@@ -558,7 +544,7 @@ class _PaymentAmount extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final amount = _ringgit(cents);
+    final amount = formatRinggit(cents);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -688,7 +674,7 @@ class _CompactActionsState extends State<_CompactActions> {
 class _Detail extends StatelessWidget {
   const _Detail({required this.label, required this.value}) : monetary = false;
   _Detail.money({required this.label, required int cents})
-    : value = _ringgit(cents),
+    : value = formatRinggit(cents),
       monetary = true;
   final String label, value;
   final bool monetary;

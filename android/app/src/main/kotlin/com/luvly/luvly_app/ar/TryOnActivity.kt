@@ -112,12 +112,12 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
     @Volatile private var active=false
     @Volatile private var dead=false
     private var lastFrame=0L
-    private var lastDisplay=0L
     private var hasLiveFrame=false
     @Volatile private var framePosted=false
     private var front=true
     private var initialized=false
     private var selectedDress: ArDress?=null
+    private var generatedDress: ArDress?=null
     private var fullBodyVisible=false
 
     private val permission=registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -127,7 +127,8 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        selectedDress=ArDressCatalogue.resolve(intent.getStringExtra("dressId"),intent.getStringExtra("modelAsset"))
+        generatedDress=GeneratedDressFile.resolve(this,intent)
+        selectedDress=generatedDress ?: ArDressCatalogue.resolve(intent.getStringExtra("dressId"),intent.getStringExtra("modelAsset"))
         if(selectedDress==null) {
             Toast.makeText(this,"AR preview unavailable for this dress",Toast.LENGTH_LONG).show()
             finish(); return
@@ -283,6 +284,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                     countdown!=null -> cancelCountdown()
                     photoDelaySeconds>0 -> startCountdown()
                     readiness.ready(SystemClock.uptimeMillis()) -> freezeReadyPreview()
+                    smoothed!=null -> waitForFreshPreview()
                     else -> showCaptureHelp()
                 }
             }
@@ -385,9 +387,9 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
 
     private fun updatePreviewButton() {
         if(!::freezeButton.isInitialized)return
-        freezeButton.isEnabled=PreviewEligibility.canPress(active && !dead && !switchingDress,renderer!=null,
-            hasLiveFrame && SystemClock.uptimeMillis()-lastDisplay in 0..700,
-            frozen,countdown!=null,saving)
+        val enabled=PreviewEligibility.canPress(active && !dead && !switchingDress,renderer!=null,
+            hasLiveFrame,frozen,countdown!=null,saving)
+        if(freezeButton.isEnabled!=enabled)freezeButton.isEnabled=enabled
     }
 
     private fun displayName(): String = selectedDress?.label?.substringBefore(" •") ?: "Dress preview"
@@ -412,7 +414,8 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
     private fun chooseDress() {
         if(saving || switchingDress || dressPicker!=null)return
         if(!frozen)cancelCountdown()
-        dressPicker=DressPickerDialog(this,ArDressCatalogue.all(),selectedDress?.id,frozen && !saved) { next ->
+        val choices=ArDressCatalogue.all()+listOfNotNull(generatedDress)
+        dressPicker=DressPickerDialog(this,choices,selectedDress?.id,frozen && !saved) { next ->
             switchDress(next)
         }.also { dialog ->
             dialog.setOnDismissListener { dressPicker=null }
@@ -424,7 +427,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
     protected fun switchDress(next: ArDress) {
         val targetRenderer=renderer ?: return
         if(dead || !active || saving || switchingDress || next.id==selectedDress?.id ||
-            ArDressCatalogue.resolve(next.id,next.asset)!=next)return
+            (next!=generatedDress && ArDressCatalogue.resolve(next.id,next.asset)!=next))return
         cancelCountdown();showControls(false)
         previewEpoch++ // Reject camera work queued for the old model / anchors.
         refiningPreview=false
@@ -517,7 +520,9 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
         Thread {
             val error=runCatching {
                 val store=accountLookStore()
-                store.save(capturedDress.id,capturedFullBody) { check(snapshot.compress(Bitmap.CompressFormat.PNG,100,it)) }
+                store.save(capturedDress.id,capturedFullBody,capturedDress.name) {
+                    check(snapshot.compress(Bitmap.CompressFormat.PNG,100,it))
+                }
             }.exceptionOrNull()
             snapshot.recycle()
             runOnUiThread {
@@ -550,8 +555,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
 
     private fun startCountdown() {
         if(!PreviewEligibility.canPress(active && !dead && !switchingDress,renderer!=null,
-            hasLiveFrame && SystemClock.uptimeMillis()-lastDisplay in 0..700,
-            false,false,saving))return
+            hasLiveFrame,false,false,saving))return
         showControls(false)
         freezeButton.text="Cancel timer"
         countdownLabel.visibility=View.VISIBLE
@@ -574,6 +578,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
 
     /** Allow a short recovery window, never freeze a stale or invalid pose. */
     private fun waitForFreshPreview() {
+        freezeButton.text="Cancel timer"
         countdownLabel.visibility=View.VISIBLE
         countdownLabel.text="Waiting for a clear pose…"
         val recovery=PreviewRecovery(SystemClock.uptimeMillis())
@@ -591,6 +596,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                     "No photo taken. Live try-on continues; face forward to align and try again.",Toast.LENGTH_LONG).show()
             }
         }.start()
+        updatePreviewButton()
     }
 
     private fun freezeReadyPreview() {
@@ -765,7 +771,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                 rotated.recycle();bitmap=null
                 runOnUiThread {
                     if(!dead && active && !frozen && epoch==previewEpoch && generation==cameraGeneration) {
-                        resetTracking();hasLiveFrame=false;renderer?.update(null,1f);updatePreviewButton()
+                        resetTracking();renderer?.update(null,1f);updatePreviewButton()
                         status.text="Tracker restarted · Face forward briefly to resume"
                     }
                 }
@@ -812,7 +818,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
             bitmap?.recycle()
             pendingMask?.recycle()
             runOnUiThread { if(!dead && !frozen && epoch==previewEpoch && generation==cameraGeneration) {
-                resetTracking();hasLiveFrame=false;renderer?.update(null,1f);updatePreviewButton()
+                resetTracking();renderer?.update(null,1f);updatePreviewButton()
                 status.text="Tracking interrupted. Close and reopen live try-on."
             } }
         } finally { frame.close() }
@@ -837,7 +843,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                 image.setImageBitmap(rotated)
                 val bounds=PoseAlignment.imageBounds(rotated.width,rotated.height,image.width,image.height)
                 texture.clipBounds=Rect(bounds[0],bounds[1],bounds[2],bounds[3])
-                lastDisplay=capturedAt;hasLiveFrame=true
+                hasLiveFrame=true
                 val now=SystemClock.uptimeMillis()
                 val imagePose=if(now-capturedAt in 0..700)
                     PoseAlignment.align(points,rotated.width,rotated.height,image.width,image.height,selectedDress!!.anchors)
@@ -934,7 +940,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                     targetReason=="target_confirming" -> "Finding you · Hold a front view briefly"
                     targetReason=="target_reconfirming" -> "Found your position · Hold still briefly to resume"
                     targetReason=="target_ambiguous" -> "More than one possible target · Keep other people and mirrors out of view"
-                    targetReason=="target_lost" -> "Tracking paused · Return to your spot, or re-align below"
+                    targetReason=="target_lost" -> "Tracking paused · Face forward near the centre"
                     targetBlocked -> "Waiting for fresh tracking · Hold still briefly"
                     pose!=null && filtered.accepted -> when {
                         UpperBodyPreview.isUpper(pose) -> "LIVE · Upper-body preview · Step back to see more of the gown"
@@ -969,12 +975,6 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
                 smoothed=null;renderer?.update(null,1f)
                 arms.update(null);displayedPoints=emptyList();displayedArmMask=null
                 status.text="Tracking paused · Face the camera with both shoulders visible"
-            }
-            // Keep capture expiry strict, but never reset the display filter merely
-            // because detector input has aged while a newer UI result is visible.
-            if(now-lastDisplay>700) {
-                readiness.reset()
-                updatePreviewButton()
                 if(diagnosticsLabel.visibility==View.VISIBLE)diagnosticsLabel.text=diagnostics.compact(now)
             }
         }
@@ -1003,6 +1003,7 @@ open class TryOnActivity: ComponentActivity(), Choreographer.FrameCallback {
         super.onPause()
     }
     override fun onDestroy() {
+        if(!isChangingConfigurations)generatedDress?.let { GeneratedDressFile.remove(this,it.asset) }
         dead=true; active=false
         if(::freezeButton.isInitialized) cancelCountdown()
         Choreographer.getInstance().removeFrameCallback(this)

@@ -35,7 +35,7 @@ async function readBody(req, form = false, limit = 8192) {
   } catch { throw new HttpError(400, 'INVALID_JSON'); }
 }
 
-export function createHandler({ service, packages, packageRentals, calendar, rentals, bookings, workforce, staffAccounts, workspace, profilePhotos, recommendationProfiles, reviews, assistant, promotions, analytics, analyticsEvents, customerPlanning, fittingWorkflow, directory, verifyToken, allowedOrigins = [], now = Date.now }) {
+export function createHandler({ service, packages, packageRentals, calendar, rentals, bookings, workforce, staffAccounts, workspace, profilePhotos, recommendationProfiles, reviews, dressAr, assistant, assistantConversations, promotions, analytics, analyticsEvents, customerPlanning, fittingWorkflow, directory, verifyToken, allowedOrigins = [], now = Date.now }) {
   // Demo single-process limiter. Not a replacement for production edge protection.
   const buckets = new Map();
   let reviewUploadsInFlight=0;
@@ -92,6 +92,42 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
       if (!bucket || bucket.until <= time) { bucket = { count: 0, until: time + 60000 }; buckets.set(key, bucket); }
       if (++bucket.count > (callback ? 120 : 30)) throw new HttpError(429, 'TRY_LATER');
       if (callback) { await service.callback(await readBody(req, true)); send(200, { received: true }); return; }
+      if (dressAr && url.pathname === '/v1/tripo/connection' && req.method === 'GET' && !url.search) {
+        send(200, await dressAr.connection(uid)); return;
+      }
+      const deleteDress = /^\/v1\/dresses\/([A-Za-z0-9_-]{1,150})\/delete$/.exec(url.pathname);
+      if (rentals && deleteDress && req.method === 'POST') {
+        if (url.search) throw new HttpError(400, 'INVALID_DRESS_DELETE');
+        send(200, await rentals.deleteDress(uid, deleteDress[1], await readBody(req))); return;
+      }
+      const arRoute = /^\/v1\/dresses\/([A-Za-z0-9_-]{1,150})\/ar\/([1-9][0-9]{0,14})\/(status|generate|approval|preview|available|model)$/.exec(url.pathname);
+      if (dressAr && arRoute) {
+        if (url.search) throw new HttpError(400, 'TRIPO_INVALID_REQUEST');
+        const [, id, revision, action] = arRoute;
+        const rev = Number(revision);
+        if (req.method === 'GET') {
+          if (action === 'status') { send(200, await dressAr.status(uid, id, rev)); return; }
+          if (action === 'available') { send(200, { available: await dressAr.available(uid, id, rev) }); return; }
+          if (action === 'model' || action === 'preview') {
+            const { bytes, mime } = await dressAr.media(uid, id, rev, action);
+            res.writeHead(200, { 'Content-Type': mime, 'Content-Length': bytes.length });
+            res.end(bytes);
+            return;
+          }
+        }
+        if (req.method === 'POST' && (action === 'generate' || action === 'approval')) {
+          const body = await readBody(req);
+          if (action === 'generate' && Object.keys(body).length === 1 && body.confirmed === true) {
+            send(200, await dressAr.start(uid, id, rev));
+            return;
+          }
+          if (action === 'approval' && Object.keys(body).length === 2) {
+            send(200, await dressAr.approve(uid, id, rev, body.approved, body.front));
+            return;
+          }
+          throw new HttpError(400, 'TRIPO_INVALID_REQUEST');
+        }
+      }
       if(reviews&&url.pathname.startsWith('/v1/review-reports')){
         if(url.pathname==='/v1/review-reports'&&req.method==='GET'){
           if([...url.searchParams.keys()].some(k=>k!=='status')||url.searchParams.getAll('status').length>1)throw new HttpError(400,'INVALID_REVIEW_REPORT');
@@ -191,6 +227,11 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
         if(url.search)throw new HttpError(400,'INVALID_DIRECTORY_QUERY');
         send(200,await directory.list(uid,directoryRoute[1]));return;
       }
+      const makeupOptions=/^\/v1\/package-selections\/([a-f0-9]{32})\/fitting-makeup-options$/.exec(url.pathname);
+      if(fittingWorkflow&&makeupOptions&&req.method==='GET'){
+        if(url.search)throw new HttpError(400,'INVALID_FITTING_CHOICE');
+        send(200,await fittingWorkflow.makeupOptions(uid,makeupOptions[1]));return;
+      }
       const fittingRoute=/^\/v1\/package-selections\/([a-f0-9]{32})\/(fitting-choice|fitting-result|fitting-quote|fitting-response|fitting-intent|final-fitting|fitting-gown-options)$/.exec(url.pathname);
       if(fittingWorkflow&&fittingRoute&&req.method==='POST'){
           if(url.search)throw new HttpError(400,'INVALID_FITTING_CHOICE');
@@ -224,6 +265,27 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
       if(assistant && url.pathname==='/v1/support-assistant'){
         if(req.method==='GET'){send(200,await assistant.status(uid));return;}
         if(req.method==='POST'){send(200,await assistant.ask(uid,await readBody(req)));return;}
+      }
+      if(assistantConversations && url.pathname.startsWith('/v1/assistant-conversations')){
+        const base='/v1/assistant-conversations';
+        const chats=assistantConversations;
+        if(req.method==='GET' && url.pathname===base){send(200,await chats.resume(uid));return;}
+        if(req.method==='POST'){
+          if(url.pathname===base+'/list'){send(200,await chats.list(uid,await readBody(req)));return;}
+          if(url.pathname===base+'/new'){send(200,await chats.select(uid,null,await readBody(req)));return;}
+          if(url.pathname===base+'/preferences'){send(200,await chats.update(uid,null,await readBody(req)));return;}
+        }
+        const room=/^\/v1\/assistant-conversations\/([a-f0-9]{32})(?:\/(open|update|delete|send))?$/.exec(url.pathname);
+        if(room){
+          const [,id,action]=room;
+          if(req.method==='GET'&&!action){send(200,await chats.read(uid,id,url.searchParams.get('before')));return;}
+          if(req.method==='POST'){
+            if(action==='open'){send(200,await chats.select(uid,id));return;}
+            if(action==='update'){send(200,await chats.update(uid,id,await readBody(req)));return;}
+            if(action==='delete'){send(200,await chats.remove(uid,id));return;}
+            if(action==='send'){send(200,await chats.send(uid,id,await readBody(req)));return;}
+          }
+        }
       }
       if(bookings && url.pathname==='/v1/appointment-schedule' && req.method==='GET') {
         if([...url.searchParams.keys()].some(k=>!['month','scope'].includes(k)) || url.searchParams.getAll('month').length!==1 || url.searchParams.getAll('scope').length>1)throw new HttpError(400,'INVALID_SCHEDULE_MONTH');
@@ -318,8 +380,12 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
         if(url.search)throw new HttpError(400,'INVALID_SELECTION');
         send(200,await packages.availability(uid,await readBody(req)));return;
       }
+      const approvedPricing = /^\/v1\/packages\/([A-Za-z0-9_-]{1,150})\/approved-pricing$/.exec(url.pathname);
+      if (packages && approvedPricing && req.method === 'GET' && !url.search) {
+        send(200, await packages.approvedPricing(uid, approvedPricing[1])); return;
+      }
       if (packages && url.pathname === '/v1/packages') {
-        if (req.method === 'GET') { send(200, await packages.catalogue(uid, url.searchParams.get('serviceTypes') === '1')); return; }
+        if (req.method === 'GET') { send(200, await packages.catalogue(uid, url.searchParams.get('serviceTypes') === '1', url.searchParams.get('itemPricing') === '1', url.searchParams.get('veilUpgrades') === '1')); return; }
         if (req.method === 'POST') { send(200, await packages.save(uid, await readBody(req, false, 65536))); return; }
       }
       if (packages && url.pathname === '/v1/package-selections') {

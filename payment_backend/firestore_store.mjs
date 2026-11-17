@@ -1,10 +1,36 @@
 import { HttpError } from './payment_service.mjs';
 import { finalFittingRequired } from './final_fitting.mjs';
 import { activeEmployee, canViewAllAppointments } from './appointment_access.mjs';
+import { FieldPath } from 'firebase-admin/firestore';
 
 export class FirestoreStore {
   constructor(database) { this.db = database; }
   async get(path) { return (await this.db.doc(path).get()).data(); }
+  async conversationPage(uid, state, term, cursor, limit) {
+    let query=this.db.collection(`assistantAccounts/${uid}/conversations`).where('state','==',state);
+    if(term)query=query.where('searchTerms','array-contains',term);
+    query=query.orderBy('updatedAt','desc').orderBy(FieldPath.documentId(),'desc')
+      .select('state','title','preview','language','updatedAt','deleting','turnCount');
+    if(cursor)query=query.startAfter(...cursor);
+    return (await query.limit(limit).get()).docs.map(doc=>({id:doc.id,data:doc.data()}));
+  }
+  assistantTurnsQuery(path, before, limit) {
+    const query=this.db.collection(`${path}/turns`).orderBy('sequence','desc');
+    return (before===null?query:query.startAfter(before)).limit(limit);
+  }
+  async conversationTurns(path, before, limit) {
+    return (await this.assistantTurnsQuery(path,before,limit).get()).docs.map(doc=>({id:doc.id,data:doc.data()}));
+  }
+  conversationWithTurns(path, before, limit) {
+    return this.db.runTransaction(async tx=>{
+      const room=(await tx.get(this.db.doc(path))).data();
+      const page=room&&!room.deleting?await tx.get(this.assistantTurnsQuery(path,before,limit)):null;
+      return {room,rows:page?.docs.map(doc=>({id:doc.id,data:doc.data()}))??[]};
+    },{readOnly:true});
+  }
+  purgeConversationTurns(path) {
+    return this.db.recursiveDelete(this.db.collection(`${path}/turns`));
+  }
   async pendingNotificationSources(uid) {
     const staff=(await this.db.doc(`staff/${uid}`).get()).data();
     const selectionQuery=this.db.collection('packageSelections').where(staff?'fittingQuote.by':'uid','==',uid).limit(501);
@@ -187,6 +213,8 @@ export class FirestoreStore {
       reviewUploads:reviewId=>rows(this.db.collection('customerReviewUploads').where('reviewId','==',reviewId).where('status','in',['Ready','Reserved'])),
       workspaceTasks:uid=>rows(uid===undefined?this.db.collection('tasks'):this.db.collection('tasks').where('assignedStaffId','==',uid)),
       staffRoster:()=>rows(this.db.collection('staff').select('name','role','active')),
+      makeupTrialAppointments:uid=>rows(this.db.collection('appointments').where('uid','==',uid)
+        .select('uid','type','status','startAt','assignedStaffId','revision')),
       staffAccountRows:()=>rows(this.db.collection('staff').select('name','email','phone','role','active','accountRevision','pendingActivation','invitationState','accountPending','sessionReviewRequired')),
       staffCommitments:async uid=>{
         const assigned=async collection=>{
@@ -201,8 +229,50 @@ export class FirestoreStore {
       staffAppointments:uid=>rows(this.db.collection('appointments').where('assignedStaffId','==',uid).select('assignedStaffId','startAt','type','status','paymentExpiresAt')),
       schedulingDays:async()=>(await rows(this.db.collection('appointmentAvailability'))).map(d=>({...d,day:d.day??d.id})),
       hasPackageSelections: async id => !(await tx.get(this.db.collection('packageSelections').where('packageId', '==', id).limit(1))).empty,
+      dressDeletionState: async id => {
+        const collection = name => this.db.collection(name);
+        const [appointments, packages, reviews, arJobs, variants] = await Promise.all([
+          tx.get(collection('appointments').where('dressId', '==', id).select().limit(1)),
+          tx.get(collection('servicePackages').where('eligibleDressIds', 'array-contains', id).select().limit(1)),
+          tx.get(collection('customerReviews').where('gownIds', 'array-contains', id).select().limit(1)),
+          tx.get(collection(`dressArJobs/${id}/photos`).select('state', 'taskId').limit(201)),
+          tx.get(collection('rentalVariants').where('dressId', '==', id).select('allocations').limit(101)),
+        ]);
+        if (arJobs.size > 200 || variants.size > 100) throw new HttpError(409, 'DRESS_REFERENCE_CHECK_LIMIT');
+        const inUse = !appointments.empty || !packages.empty || !reviews.empty ||
+          variants.docs.some(doc => Object.keys(doc.data().allocations ?? {}).length > 0);
+        const arInUse = arJobs.docs.some(doc => {
+          const job = doc.data();
+          return job.state !== 'failed' || !!job.taskId;
+        });
+        if (inUse || arInUse) return { inUse, arInUse };
+        // Firestore cannot query a property inside the legacy arrays of gowns.
+        // Scan only the fields that retain the current and previous selections.
+        const [rentals, selections] = await Promise.all([
+          tx.get(collection('rentals').select('gowns').limit(5001)),
+          tx.get(collection('packageSelections').select('selectedGowns', 'selectionHistory',
+            'fittingDecision.selectedGowns', 'fittingDecision.gownChange', 'fittingDecisionHistory').limit(5001)),
+        ]);
+        if (rentals.size > 5000 || selections.size > 5000) throw new HttpError(409, 'DRESS_REFERENCE_CHECK_LIMIT');
+        return {
+          inUse: rentals.docs.some(doc => containsDress(doc.data().gowns, id)) ||
+            selections.docs.some(doc => selectionReferencesDress(doc.data(), id)),
+          variantIds: variants.docs.map(doc => doc.id),
+          failedArJobIds: arJobs.docs.map(doc => doc.id),
+        };
+      },
       set: (path, data) => tx.set(this.db.doc(path), data),
       delete: path => tx.delete(this.db.doc(path)),
     });});
   }
+}
+
+const containsDress = (gowns, id) => Array.isArray(gowns) && gowns.some(gown => gown?.dressId === id);
+
+export function selectionReferencesDress(selection, id) {
+  if (containsDress(selection.selectedGowns, id) ||
+      selection.selectionHistory?.some(prior => containsDress(prior?.selectedGowns, id))) return true;
+  return [selection.fittingDecision, ...(selection.fittingDecisionHistory ?? [])].some(decision =>
+    containsDress(decision?.selectedGowns, id) ||
+    containsDress(decision?.gownChange?.from, id) || containsDress(decision?.gownChange?.to, id));
 }

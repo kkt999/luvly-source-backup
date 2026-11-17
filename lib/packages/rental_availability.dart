@@ -1,7 +1,8 @@
 /// Only public, per-size statuses; never contains another customer's booking.
 class RentalAvailability {
   RentalAvailability(Map<String, dynamic> json)
-    : gowns = {
+    : accessoryCatalogueVersion = json['accessoryCatalogueVersion'] as int?,
+      gowns = {
         for (final gown in json['gowns'] as List)
           gown['dressId'] as String: {
             for (final entry in gown['sizes'] as List)
@@ -14,6 +15,7 @@ class RentalAvailability {
       };
   final Map<String, Map<String, String>> gowns;
   final Map<String, String> accessories;
+  final int? accessoryCatalogueVersion;
   String status(String dressId, String size) =>
       gowns[dressId]?[size] ?? 'Unconfirmed';
   bool available(String dressId, String size) =>

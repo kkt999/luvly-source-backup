@@ -13,6 +13,19 @@ class PaymentFailure implements Exception {
   final String? code;
 }
 
+final _thousandsGroups = RegExp(r'(\d)(?=(?:\d{3})+$)');
+
+String formatRinggit(int cents) {
+  final whole = (cents ~/ 100).abs().toString();
+  final grouped = whole.replaceAllMapped(
+    _thousandsGroups,
+    (digit) => '${digit[1]},',
+  );
+  final fraction = cents.remainder(100).abs().toString().padLeft(2, '0');
+  final sign = cents < 0 ? '-' : '';
+  return 'RM $sign$grouped.$fraction';
+}
+
 String paymentDateLabel(int milliseconds) {
   final d = DateTime.fromMillisecondsSinceEpoch(
     milliseconds,
@@ -101,7 +114,7 @@ class SandboxInvoice {
   /// Calendar date only, from the owner-bound active rental; not midnight expiry.
   final String? pickupDueDate;
   final String? invoiceNo, checkoutUrl, reviewReason, customerName;
-  String get amountLabel => 'RM ${(amountCents / 100).toStringAsFixed(2)}';
+  String get amountLabel => formatRinggit(amountCents);
   bool get holdExpired =>
       holdExpiresAt != null &&
       DateTime.now().millisecondsSinceEpoch >= holdExpiresAt!;
@@ -311,6 +324,44 @@ class HttpPaymentApi implements PaymentApi {
     Uint8List bytes,
     String mime,
   ) => _request(path, bytes: bytes, contentType: mime);
+
+  Future<Uint8List> downloadBusinessFile(
+    String path, {
+    required Set<String> types,
+    required int maxBytes,
+  }) async {
+    final token = await _token().timeout(const Duration(seconds: 10));
+    if (token == null) throw const PaymentFailure('Please sign in again.');
+    final origin =
+        _base ?? await _resolveBaseUrl().timeout(const Duration(seconds: 10));
+    final request = http.Request('GET', _url(origin, path))
+      ..followRedirects = false
+      ..headers['Authorization'] = 'Bearer $token';
+    final response = await _client
+        .send(request)
+        .timeout(const Duration(seconds: 30));
+    final output = BytesBuilder(copy: false);
+    final type = response.headers['content-type']?.split(';').first;
+    await for (final chunk in response.stream.timeout(
+      const Duration(seconds: 20),
+    )) {
+      if (response.statusCode != 200 ||
+          !types.contains(type) ||
+          (response.contentLength ?? 0) > maxBytes ||
+          output.length + chunk.length > maxBytes) {
+        throw const PaymentFailure(
+          'Could not download the file. Please try again.',
+        );
+      }
+      output.add(chunk);
+    }
+    if (output.isEmpty) {
+      throw const PaymentFailure(
+        'Could not download the file. Please try again.',
+      );
+    }
+    return output.takeBytes();
+  }
 
   /// Authenticated invalidations only. Cancellation aborts the browser fetch;
   /// tokens never appear in URLs and redirects are never followed.
@@ -531,8 +582,24 @@ class HttpPaymentApi implements PaymentApi {
             'Check the campaign fields, discount amount and date range.',
           'FITTING_QUOTE_ACCEPTANCE_REQUIRED' =>
             'Ask the customer to review and accept the current fitting proposal before issuing a deposit.',
+          'DRESS_IN_USE' =>
+            'This dress is linked to records in Luvly. You can unpublish it from the customer catalogue.',
+          'DRESS_AR_IN_USE' =>
+            'This dress has a Tripo model or generation job. You can unpublish the dress.',
+          'DRESS_DELETE_CHANGED' =>
+            'This dress changed. Refresh the inventory before trying again.',
+          'DRESS_REFERENCE_CHECK_LIMIT' =>
+            'The service could not check all references. You can unpublish the dress.',
           'PACKAGE_SERVICE_TIMING_REQUIRED' =>
             'Confirm the timing of each selected team-arranged service before sending the proposal.',
+          'PACKAGE_MAKEUP_TRIAL_CHANGED' =>
+            'The makeup trial changed. Ask the team to refresh the arrangement and send an updated proposal.',
+          'PACKAGE_MAKEUP_ARTIST_UNAVAILABLE' =>
+            'This team member is no longer available to assign. Refresh and choose an eligible makeup artist.',
+          'PACKAGE_ACCESSORY_APPROVAL_REQUIRED' =>
+            'Confirm the approved package and veil prices before publishing.',
+          'INVALID_PACKAGE_ACCESSORY_PRICING' =>
+            'Use one separate Veil Rental and one Bridal Accessories service. Remove any legacy allowance services from this configuration.',
           'PACKAGE_ACCESSORY_SELECTION_REQUIRED' =>
             'Ask the customer to select available accessories or remove the optional service before sending a proposal.',
           'PACKAGE_SERVICE_PLAN_UPDATE_REQUIRED' =>

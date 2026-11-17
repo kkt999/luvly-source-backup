@@ -6,9 +6,10 @@ import java.util.Properties
 import java.util.UUID
 
 data class SavedLook(val id: String,val dressId: String,val savedAt: Long,
-                     val fullBody: Boolean,val path: String) {
+                     val fullBody: Boolean,val path: String,val dressName: String?=null) {
     fun toMap(): Map<String,Any> = mapOf("id" to id,"dressId" to dressId,
-        "savedAt" to savedAt,"fullBody" to fullBody,"path" to path)
+        "savedAt" to savedAt,"fullBody" to fullBody,"path" to path)+
+        (dressName?.let { mapOf("dressName" to it) } ?: emptyMap())
 }
 
 /** Explicit saves only. Caller uses noBackupFilesDir, never cloud/shared storage. */
@@ -25,13 +26,14 @@ class LookStore(private val directory: File) {
             check(picture.isFile)
             val p=Properties().apply { metadata.inputStream().use { load(it) } }
             val dressId=p.getProperty("dressId")
-            check(ArDressCatalogue.byId(dressId)!=null)
+            check(ArDressCatalogue.byId(dressId)!=null || GeneratedDressFile.isGenerated(dressId))
             SavedLook(id,dressId,p.getProperty("savedAt").toLong(),
-                p.getProperty("fullBody")=="true",picture.absolutePath)
+                p.getProperty("fullBody")=="true",picture.absolutePath,p.getProperty("dressName"))
         }.getOrNull() }?.sortedByDescending { it.savedAt } ?: emptyList()
 
-    @Synchronized fun save(dressId: String,fullBody: Boolean,writeImage: (OutputStream)->Unit): SavedLook {
-        require(ArDressCatalogue.byId(dressId)!=null)
+    @Synchronized fun save(dressId: String,fullBody: Boolean,dressName: String?=null,
+                           writeImage: (OutputStream)->Unit): SavedLook {
+        require(ArDressCatalogue.byId(dressId)!=null || GeneratedDressFile.isGenerated(dressId))
         check(list().size<50) { "Your 50-look album is full. Delete a look before saving another." }
         check(directory.isDirectory || directory.mkdirs()) { "Storage is unavailable" }
         val id=UUID.randomUUID().toString();val now=System.currentTimeMillis()
@@ -42,8 +44,9 @@ class LookStore(private val directory: File) {
             Properties().apply {
                 setProperty("dressId",dressId);setProperty("savedAt",now.toString())
                 setProperty("fullBody",fullBody.toString())
+                dressName?.let { setProperty("dressName",it) }
             }.also { p -> metadata.outputStream().use { p.store(it,"Luvly local appearance preview") } }
-            return SavedLook(id,dressId,now,fullBody,picture.absolutePath)
+            return SavedLook(id,dressId,now,fullBody,picture.absolutePath,dressName)
         } catch(e: Exception) {
             temporary.delete();picture.delete();metadata.delete();throw e
         }

@@ -13,9 +13,8 @@ const _groups = {
   ],
   'Rental & accessories': [
     PackageServiceType.extraRentalDay,
-    PackageServiceType.veil,
-    PackageServiceType.jewellery,
-    PackageServiceType.veilAndJewellery,
+    PackageServiceType.packageVeil,
+    PackageServiceType.itemAccessories,
   ],
   'Other': [PackageServiceType.custom],
 };
@@ -33,6 +32,10 @@ String serviceCategoryDescription(PackageServiceType type) => switch (type) {
     'An additional visit to try or adjust the gown.',
   PackageServiceType.extraRentalDay =>
     'Adds one calendar day to the rental period.',
+  PackageServiceType.packageVeil =>
+    'One veil priced through this package. Choose its inclusion or removal price below.',
+  PackageServiceType.itemAccessories =>
+    'Customers may add accessories at their catalogue rental prices.',
   PackageServiceType.veil =>
     'Customers choose a veil using the allowance you set.',
   PackageServiceType.jewellery =>
@@ -50,7 +53,9 @@ IconData serviceCategoryIcon(PackageServiceType? type) => switch (type) {
   PackageServiceType.portraits => Icons.photo_camera_outlined,
   PackageServiceType.extraFitting => Icons.straighten_outlined,
   PackageServiceType.extraRentalDay => Icons.calendar_today_outlined,
+  PackageServiceType.packageVeil ||
   PackageServiceType.veil => Icons.checkroom_outlined,
+  PackageServiceType.itemAccessories ||
   PackageServiceType.jewellery ||
   PackageServiceType.veilAndJewellery => Icons.diamond_outlined,
   _ => Icons.description_outlined,

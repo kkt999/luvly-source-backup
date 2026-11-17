@@ -3,6 +3,7 @@ import {hasAppointmentStaffAccess,hasBoutiqueOperationsAccess} from './appointme
 import {BookingService} from './booking_service.mjs';
 import {effectiveVisitTime,fittingFitsRental,malaysiaDay} from './booking_dates.mjs';
 import {quoteFitting,respondFitting} from './fitting_proposals.mjs';
+import {fittingMakeupOptions} from './fitting_makeup.mjs';
 import {validateFittingAssessment} from './fitting_assessment.mjs';
 import {recordFinalFitting} from './final_fitting.mjs';
 import {fittingGownOptions,validateGownChange,prepareFittingGownChange} from './fitting_gown_change.mjs';
@@ -15,6 +16,7 @@ const active=s=>s?.active===true&&['staff','manager'].includes(s.role);
 export class FittingWorkflow{
   constructor({store,now=Date.now}){Object.assign(this,{store,now});this.bookings=new BookingService({store,now,feePolicy:true});}
   quote(uid,selectionId,input){return quoteFitting(this,uid,selectionId,input);}
+  makeupOptions(uid,selectionId){return fittingMakeupOptions(this,uid,selectionId);}
   respond(uid,selectionId,input){return respondFitting(this,uid,selectionId,input);}
   final(uid,selectionId,input){return recordFinalFitting(this,uid,selectionId,input);}
   gownOptions(uid,selectionId,input){return fittingGownOptions(this,uid,selectionId,input);}

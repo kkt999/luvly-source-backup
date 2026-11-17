@@ -36,7 +36,12 @@ class _ServiceDraft {
       allowance = TextEditingController(
         text: _amount(original?.allowanceCents),
       ),
-      kind = original?.kind ?? 'Required',
+      kind =
+          original?.kind ??
+          ((initialType == PackageServiceType.makeupTrial ||
+                  initialType == PackageServiceType.itemAccessories)
+              ? 'Add-on'
+              : 'Required'),
       type = original == null ? initialType : original.serviceType;
 
   final PackageServiceItem? original;
@@ -53,6 +58,7 @@ class _ServiceDraft {
         previous != PackageServiceType.custom &&
         currentName == previous.label;
     type = next;
+    if (itemPriced) kind = 'Add-on';
     if (currentName.isEmpty || usesCategoryName) {
       name.text = switch (next) {
         null => original?.name ?? '',
@@ -68,11 +74,16 @@ class _ServiceDraft {
   String? get descriptionError =>
       _textError(description.text, 0, 300, 'service description');
   String? get priceError =>
-      kind != 'Required' && serviceCents(price.text) == null
+      !itemPriced && kind != 'Required' && serviceCents(price.text) == null
       ? 'Enter a valid amount with up to 2 decimals.'
       : null;
+  bool get itemPriced => type == PackageServiceType.itemAccessories;
+  bool get usesAllowance =>
+      type?.isAccessory == true &&
+      !itemPriced &&
+      type != PackageServiceType.packageVeil;
   String? get allowanceError =>
-      type?.isAccessory == true && serviceCents(allowance.text) == null
+      usesAllowance && serviceCents(allowance.text) == null
       ? 'Enter an allowance, or 0 if items are charged separately.'
       : null;
   bool get valid =>
@@ -86,9 +97,14 @@ class _ServiceDraft {
     name: name.text.trim(),
     description: description.text.trim(),
     kind: kind,
-    priceCents: kind == 'Required' ? 0 : serviceCents(price.text) ?? 0,
+    priceCents: kind == 'Required' || itemPriced
+        ? 0
+        : serviceCents(price.text) ?? 0,
     serviceType: type,
-    accessoryAllowanceCents: type?.isAccessory == true
+    standardVeilId: type == PackageServiceType.packageVeil
+        ? original?.standardVeilId
+        : null,
+    accessoryAllowanceCents: usesAllowance
         ? serviceCents(allowance.text)
         : null,
   );
@@ -141,9 +157,20 @@ class _PackageEditorState extends State<PackageEditor> {
   Future<AccessoryCatalogue>? accessoryCatalogue;
   String? editingServiceId;
   bool reviewing = false, busy = false;
+  bool approvedPreview = false;
   String? error;
 
   bool get active => widget.package?.active ?? false;
+  bool get preserveEligibility =>
+      approvedPreview ||
+      (widget.package?.services.any((s) => s.standardVeilId != null) ?? false);
+  bool get canLoadApproved =>
+      widget.api is HttpPackageApi &&
+      const {
+        'bridal-essentials',
+        'signature-bridal',
+        'luxe-bridal',
+      }.contains(id);
   int? get base => quoteAmountCents(price.text);
   List<PackageServiceItem> get rows =>
       services.map((s) => s.toService()).toList();
@@ -157,7 +184,11 @@ class _PackageEditorState extends State<PackageEditor> {
     active: active,
     services: rows,
     includedGownCount: includedGownCount,
-    allCatalogueGowns: true,
+    allCatalogueGowns:
+        !preserveEligibility || widget.package?.allCatalogueGowns == true,
+    eligibleDressIds: preserveEligibility
+        ? widget.package?.eligibleDressIds ?? const []
+        : const [],
   );
 
   @override
@@ -171,6 +202,48 @@ class _PackageEditorState extends State<PackageEditor> {
     services = p?.services.map(_ServiceDraft.new).toList() ?? [];
     includedGownCount = p?.includedGownCount ?? 0;
     loadGownLimit();
+  }
+
+  Future<void> loadApprovedPricing() async {
+    if (busy) return;
+    change(() => busy = true);
+    try {
+      final proposal = await (widget.api as HttpPackageApi).approvedPricing(id);
+      if (!mounted) return;
+      if (proposal.revision != widget.package?.revision) {
+        setState(
+          () => error = 'This package changed. Reopen its latest version.',
+        );
+        return;
+      }
+      change(() {
+        approvedPreview = true;
+        price.text = _amount(proposal.basePriceCents);
+        description.text = proposal.description;
+        final previous = services.toList();
+        services
+          ..clear()
+          ..addAll(proposal.services.map(_ServiceDraft.new));
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          for (final service in previous) {
+            service.dispose();
+          }
+        });
+        removed.clear();
+        addons.clear();
+        editingServiceId = null;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => error = e is PaymentFailure
+              ? e.message
+              : 'Could not load approved pricing.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
   Future<void> loadGownLimit() async {
@@ -292,6 +365,42 @@ class _PackageEditorState extends State<PackageEditor> {
       return;
     }
     final p = preview;
+    final usesItemPricing = p.services.any(
+      (s) => s.itemPriced || s.packageVeil,
+    );
+    if (publish && usesItemPricing) {
+      final approved = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('Confirm package pricing'),
+          content: Text(
+            [
+              'Approved base price · ${packageMoney(p.basePriceCents)}',
+              for (final veil in p.services.where((s) => s.packageVeil))
+                switch (veil.kind) {
+                  'Optional' =>
+                    '${veil.name} · Deduct ${packageMoney(veil.priceCents)} if removed',
+                  'Add-on' =>
+                    '${veil.name} · Add ${packageMoney(veil.priceCents)} if selected',
+                  _ => '${veil.name} · Included in the base price',
+                },
+              'Bridal Accessories are charged at the catalogue item prices.',
+            ].join('\n'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('Back'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('Confirm and publish'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || approved != true || busy) return;
+    }
     setState(() => busy = true);
     try {
       await widget.api.save(
@@ -302,9 +411,11 @@ class _PackageEditorState extends State<PackageEditor> {
           basePriceCents: p.basePriceCents,
           revision: p.revision,
           active: publish,
+          accessoryPricingApproved: publish && usesItemPricing,
           services: p.services,
           includedGownCount: p.includedGownCount,
-          allCatalogueGowns: true,
+          allCatalogueGowns: p.allCatalogueGowns,
+          eligibleDressIds: p.eligibleDressIds,
         ),
       );
       if (mounted) Navigator.pop(context, true);
@@ -474,6 +585,15 @@ class _PackageEditorState extends State<PackageEditor> {
           icon: Icons.description_outlined,
           subtitle: 'The name, description and standard price customers see.',
           children: [
+            if (canLoadApproved)
+              OutlinedButton(
+                onPressed: busy ? null : loadApprovedPricing,
+                child: Text(
+                  approvedPreview
+                      ? 'Reload approved pricing'
+                      : 'Load approved pricing',
+                ),
+              ),
             _FieldPair(
               first: TextFormField(
                 controller: name,
@@ -641,17 +761,20 @@ class _PackageEditorState extends State<PackageEditor> {
     final p = service.toService();
     final type = service.type;
     final expanded = service.id == editingServiceId;
-    final pricing = switch (p.kind) {
-      'Required' => 'Always included',
-      'Optional' => 'Deduct ${packageMoney(p.priceCents)} if removed',
-      _ => '+ ${packageMoney(p.priceCents)} add-on',
-    };
+    final pricing = p.itemPriced
+        ? 'Pay for selected items'
+        : switch (p.kind) {
+            'Required' => 'Always included',
+            'Optional' => 'Deduct ${packageMoney(p.priceCents)} if removed',
+            _ => '+ ${packageMoney(p.priceCents)} add-on',
+          };
     final behaviour = [
       pricing,
       if (p.requiresTeamScheduling) 'Confirm timing',
       if (p.addsRentalDay) '+1 rental day',
       if (p.isAccessory &&
-          (type?.isAccessory != true || service.allowanceError == null))
+          service.usesAllowance &&
+          service.allowanceError == null)
         '${packageMoney(p.allowanceCents)} allowance',
     ].join(' · ');
     return Container(
@@ -726,25 +849,32 @@ class _PackageEditorState extends State<PackageEditor> {
                 icon: const Icon(Icons.swap_horiz, size: 18),
                 label: const Text('Change category'),
               ),
-              second: DropdownButtonFormField<String>(
-                initialValue: service.kind,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'How it’s priced'),
-                items: const [
-                  DropdownMenuItem(
-                    value: 'Required',
-                    child: Text('Always included'),
-                  ),
-                  DropdownMenuItem(
-                    value: 'Optional',
-                    child: Text('Included, removable'),
-                  ),
-                  DropdownMenuItem(value: 'Add-on', child: Text('Paid add-on')),
-                ],
-                onChanged: busy
-                    ? null
-                    : (kind) => change(() => service.kind = kind!),
-              ),
+              second: service.itemPriced
+                  ? const Text('Optional · catalogue item prices')
+                  : DropdownButtonFormField<String>(
+                      initialValue: service.kind,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'How it’s priced',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Required',
+                          child: Text('Always included'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Optional',
+                          child: Text('Included, removable'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Add-on',
+                          child: Text('Paid add-on'),
+                        ),
+                      ],
+                      onChanged: busy
+                          ? null
+                          : (kind) => change(() => service.kind = kind!),
+                    ),
             ),
             if (type != null) ...[
               const SizedBox(height: 10),
@@ -777,7 +907,8 @@ class _PackageEditorState extends State<PackageEditor> {
               validator: (_) => service.descriptionError,
               onChanged: (_) => change(() {}),
             ),
-            if (service.kind != 'Required' || type?.isAccessory == true) ...[
+            if (!service.itemPriced &&
+                (service.kind != 'Required' || service.usesAllowance)) ...[
               const SizedBox(height: 12),
               if (service.kind == 'Required')
                 allowanceField(service)
@@ -798,7 +929,7 @@ class _PackageEditorState extends State<PackageEditor> {
                     validator: (_) => service.priceError,
                     onChanged: (_) => change(() {}),
                   ),
-                  second: type?.isAccessory == true
+                  second: service.usesAllowance
                       ? allowanceField(service)
                       : null,
                 ),
@@ -914,7 +1045,8 @@ class _PackageEditorState extends State<PackageEditor> {
       _ => '+ ${packageMoney(service.priceCents)}',
     },
     if (service.isAccessory)
-      '${packageMoney(service.allowanceCents)} accessory allowance',
+      if (service.usesAccessoryAllowance)
+        '${packageMoney(service.allowanceCents)} accessory allowance',
     if (service.customerDescription.isNotEmpty) service.customerDescription,
   ].join(' · ');
 
@@ -945,7 +1077,7 @@ class _PackageEditorState extends State<PackageEditor> {
             ),
           const SizedBox(height: 8),
           const Text(
-            'Before promotions, alterations and any accessory charges above the allowance.',
+            'Before promotions, alterations and selected accessory charges.',
             style: TextStyle(color: muted),
           ),
           if (issue != null) ...[
@@ -1052,7 +1184,9 @@ class _PackageEditorState extends State<PackageEditor> {
                       ),
                     if (!active)
                       OutlinedButton(
-                        onPressed: busy ? null : () => save(publish: false),
+                        onPressed: busy || (approvedPreview && active)
+                            ? null
+                            : () => save(publish: false),
                         child: const Text('Save unpublished'),
                       ),
                     FilledButton(
@@ -1135,12 +1269,12 @@ class _AccessoryCatalogueDialogState extends State<_AccessoryCatalogueDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                '${items.length} styles · ${packageMoney(widget.service.allowanceCents)} allowance',
+                '${items.length} styles${widget.service.usesAccessoryAllowance ? ' · ${packageMoney(widget.service.allowanceCents)} allowance' : ''}',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 6),
               const Text(
-                'The customer chooses the items. Stock is checked for their rental dates, and the allowance is applied to the combined item price.',
+                'Stock is checked for the selected rental dates.',
                 style: TextStyle(color: muted),
               ),
               const SizedBox(height: 10),
@@ -1159,7 +1293,7 @@ class _AccessoryCatalogueDialogState extends State<_AccessoryCatalogueDialog> {
                   ),
                   title: Text(item.name),
                   subtitle: Text(
-                    '${item.category} · ${packageMoney(item.price)} / 3 days',
+                    '${item.category} · ${snapshot.data!.stylePrice(widget.service, item)}',
                   ),
                 ),
               ],

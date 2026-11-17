@@ -68,6 +68,23 @@ class UpperBodyPreviewTest {
         }
         assertNotNull(fit(p=p))
     }
+    @Test fun oneHipCrossingTheBottomEdgeKeepsTheUpperBodyPreview() {
+        val p=body(.94f,1.05f).apply {
+            this[11]=this[11].copy(y=.55f);this[12]=this[12].copy(y=.55f)
+            this[24]=this[24].copy(y=1.01f,confidence=.35f)
+        }
+        assertNotNull(fit(p=p))
+        p[23]=p[23].copy(y=.76f)
+        assertNull(fit(p=p))
+    }
+    @Test fun duplicateCropsCanConfirmASingleUpperBody() {
+        val lock=BodyTargetLock()
+        val p=body()
+        val duplicate=body(x=.51f)
+        for(now in listOf(1000L,1200L))
+            assertEquals("target_confirming",lock.select(listOf(p,duplicate),600,900,now).reason)
+        assertEquals("target_acquired",lock.select(listOf(duplicate,p),600,900,1400L).reason)
+    }
     @Test fun requiresRealCurrentWorldShouldersAndBoundedTurn() {
         assertNull(fit(w=emptyList()));assertNull(fit(w=world(65f)))
         assertNull(fit(w=world().apply { this[11]=this[11].copy(confidence=.3f) }))
@@ -103,6 +120,19 @@ class UpperBodyPreviewTest {
         val full=body(.93f)
         assertEquals(0,t.select(listOf(full),600,900,1500).index)
         assertEquals(0,t.select(listOf(body()),600,900,1700).index)
+    }
+    @Test fun canRecoverFromFullTorsoToCloseCropAndBackAfterLosingLock() {
+        val t=BodyTargetLock()
+        val full=body(.71f,scale=.48f)
+        val crop=body()
+        fun select(p: List<BodyPoint>, now: Long)=t.select(listOf(p),600,900,now)
+        select(full,1000);select(full,1400)
+        assertEquals("target_acquired",select(full,1800).reason)
+        assertEquals("target_lost",select(crop,2200).reason)
+        select(crop,3400);select(crop,3800)
+        assertEquals("target_reacquired",select(crop,4200).reason)
+        select(full,5800);select(full,6200)
+        assertEquals("target_reacquired",select(full,6600).reason)
     }
     @Test fun mirrorAmbiguityAndStaleFramesStillBlockUpperTarget() {
         val t=BodyTargetLock()

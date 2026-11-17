@@ -5,6 +5,7 @@ import '../catalogue/gown_filters.dart';
 import '../catalogue/gown_filter_sheet.dart';
 import '../catalogue/gown_product_content.dart';
 import '../catalogue/gown_preview_tools.dart';
+import '../catalogue/generated_gown_try_on.dart';
 import '../reviews/gown_reviews.dart';
 import '../reviews/review_api.dart';
 import '../reviews/gown_rating.dart';
@@ -671,6 +672,14 @@ class LiveDressDetailScreen extends StatelessWidget {
           );
         }
         final arDress = resolveArDress(d.arModelId);
+        final uid = AppScope.maybeOf(context)?.accountId;
+        final canOfferGenerated =
+            arDress == null &&
+            d.arModelId.isEmpty &&
+            d.photoRevision > 0 &&
+            uid != null &&
+            GeneratedGownTryOn.isAvailable &&
+            !snapshot.fromCache;
         return GownReviews(
           key: ValueKey('reviews-${d.id}'),
           dressId: d.id,
@@ -698,6 +707,14 @@ class LiveDressDetailScreen extends StatelessWidget {
                             GownPreviewTools(
                               model: arDress,
                               catalogueName: d.name,
+                            ),
+                          if (canOfferGenerated)
+                            GeneratedGownTryOn(
+                              key: ValueKey((uid, d.id, d.photoRevision)),
+                              uid: uid,
+                              dressId: d.id,
+                              dressName: d.name,
+                              photoRevision: d.photoRevision,
                             ),
                           if (BridalMakeupButton.isAvailable)
                             const BridalMakeupButton(),

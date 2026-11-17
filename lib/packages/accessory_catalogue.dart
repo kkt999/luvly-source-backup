@@ -15,6 +15,7 @@ class AccessoryItem {
   String get size => data['size'];
   String get material => data['material'];
   int get price => data['priceCents'];
+  bool get hasPrice => data['priceCents'] is int && price > 0;
 }
 
 class AccessoryCatalogue {
@@ -34,19 +35,50 @@ class AccessoryCatalogue {
   }
 
   List<AccessoryItem> choices(PackageServiceItem service) {
+    final standard = standardVeil(service);
     return items
         .where(
-          (item) => item.category == 'Veils'
-              ? service.includesVeils
-              : service.includesJewellery,
+          (item) =>
+              item.hasPrice &&
+              (item.category == 'Veils'
+                  ? service.includesVeils &&
+                        (service.standardVeilId == null ||
+                            (standard != null &&
+                                (item.id == standard.id ||
+                                    item.price > standard.price)))
+                  : service.includesJewellery),
         )
         .toList();
   }
 
-  int subtotal(Set<String> ids) =>
-      items.where((i) => ids.contains(i.id)).fold(0, (n, i) => n + i.price);
-  int extra(PackageServiceItem s, Set<String> ids) =>
-      (subtotal(ids) - s.allowanceCents).clamp(0, 100000000);
+  AccessoryItem? standardVeil(PackageServiceItem service) => items
+      .where(
+        (item) =>
+            item.id == service.standardVeilId &&
+            item.category == 'Veils' &&
+            item.hasPrice,
+      )
+      .firstOrNull;
+
+  String stylePrice(PackageServiceItem service, AccessoryItem item) {
+    if (!service.packageVeil) return '${packageMoney(item.price)} / 3 days';
+    final upgrade = extra(service, {item.id});
+    return upgrade > 0
+        ? '+ ${packageMoney(upgrade)} upgrade'
+        : 'Included in the package';
+  }
+
+  int subtotal(Set<String> ids) => items
+      .where((i) => i.hasPrice && ids.contains(i.id))
+      .fold(0, (n, i) => n + i.price);
+  int extra(PackageServiceItem s, Set<String> ids) => s.packageVeil
+      ? (subtotal(ids) - (standardVeil(s)?.price ?? subtotal(ids))).clamp(
+          0,
+          100000000,
+        )
+      : s.itemPriced
+      ? subtotal(ids)
+      : (subtotal(ids) - s.allowanceCents).clamp(0, 100000000);
 }
 
 class AccessoryServicePicker extends StatelessWidget {
@@ -70,9 +102,10 @@ class AccessoryServicePicker extends StatelessWidget {
     final stock = availability;
     final choices = catalogue.choices(service);
     final noAvailableStyles =
+        choices.isEmpty ||
         stock != null &&
-        stock.isNotEmpty &&
-        !choices.any((item) => stock[item.id] == 'Available');
+            stock.isNotEmpty &&
+            !choices.any((item) => stock[item.id] == 'Available');
     final extra = catalogue.extra(service, selected);
     final theme = Theme.of(context);
     return Padding(
@@ -82,9 +115,13 @@ class AccessoryServicePicker extends StatelessWidget {
         children: [
           Text(
             [
-              '${packageMoney(service.allowanceCents)} allowance',
-              if (selected.isNotEmpty) '${selected.length} selected',
-              if (extra > 0) '+ ${packageMoney(extra)}',
+              if (service.usesAccessoryAllowance)
+                '${packageMoney(service.allowanceCents)} allowance',
+              '${selected.length} selected',
+              if (service.itemPriced)
+                'Subtotal ${packageMoney(extra)}'
+              else if (extra > 0)
+                '+ ${packageMoney(extra)}',
             ].join(' · '),
             style: theme.textTheme.bodySmall,
           ),
@@ -97,7 +134,11 @@ class AccessoryServicePicker extends StatelessWidget {
                   selected.isEmpty
                       ? noAvailableStyles
                             ? 'Browse styles'
+                            : service.packageVeil
+                            ? 'Choose veil'
                             : 'Choose accessories'
+                      : service.packageVeil
+                      ? 'Edit veil'
                       : 'Edit accessories (${selected.length})',
                 ),
                 onPressed: () async {
@@ -115,8 +156,16 @@ class AccessoryServicePicker extends StatelessWidget {
                 },
               ),
             ),
+          if (selected.isEmpty && !readOnly)
+            const Text(
+              'Choose at least one available style or remove the service if optional.',
+            ),
           ExpansionTile(
-            key: PageStorageKey('accessory-details-${service.id}'),
+            key: PageStorageKey(
+              'accessory-details-${service.id}-${selected.isNotEmpty && (readOnly || service.itemPriced)}',
+            ),
+            initiallyExpanded:
+                selected.isNotEmpty && (readOnly || service.itemPriced),
             tilePadding: EdgeInsets.zero,
             childrenPadding: const EdgeInsets.only(bottom: 12),
             expandedCrossAxisAlignment: CrossAxisAlignment.start,
@@ -127,14 +176,15 @@ class AccessoryServicePicker extends StatelessWidget {
             children: [
               if (service.customerDescription.trim().isNotEmpty)
                 Text(service.customerDescription),
-              const Text(
-                'The package covers styles up to the allowance. Any excess is added to your total.',
-              ),
+              if (service.usesAccessoryAllowance)
+                const Text(
+                  'The package covers styles up to the allowance. Any excess is added to your total.',
+                ),
               if (selected.isEmpty)
                 Text(
                   noAvailableStyles
                       ? 'No styles can be selected for these dates. Change dates or ask Luvly to check stock before the deposit.'
-                      : 'Choose your styles now or finalise them with Luvly before the deposit.',
+                      : 'Choose an available style to continue.',
                 ),
               for (final item in catalogue.items.where(
                 (i) => selected.contains(i.id),
@@ -152,7 +202,7 @@ class AccessoryServicePicker extends StatelessWidget {
                   ),
                   title: Text(item.name),
                   subtitle: Text(
-                    '${item.category} · ${packageMoney(item.price)} / 3 days',
+                    '${item.category} · ${catalogue.stylePrice(service, item)}',
                   ),
                   trailing: readOnly
                       ? null
@@ -198,13 +248,16 @@ class AccessoryBrowser extends StatefulWidget {
 }
 
 class _AccessoryBrowserState extends State<AccessoryBrowser> {
-  late Set<String> selected = {...widget.initial};
+  late Set<String> selected = {
+    for (final item in widget.catalogue.choices(widget.service))
+      if (widget.initial.contains(item.id)) item.id,
+  };
   String category = 'All', search = '', sort = 'Featured';
-  void toggle(AccessoryItem item) => setState(
-    () => selected.contains(item.id)
-        ? selected.remove(item.id)
-        : selected.add(item.id),
-  );
+  void toggle(AccessoryItem item) => setState(() {
+    if (selected.remove(item.id)) return;
+    if (widget.service.packageVeil) selected.clear();
+    selected.add(item.id);
+  });
   bool canSelect(AccessoryItem item) =>
       widget.availability == null ||
       widget.availability![item.id] == 'Available';
@@ -215,14 +268,24 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
       : 'Not available to book yet';
   Future<void> details(AccessoryItem item) async {
     final next = {...selected};
-    selected.contains(item.id) ? next.remove(item.id) : next.add(item.id);
+    if (selected.contains(item.id)) {
+      next.remove(item.id);
+    } else {
+      if (widget.service.packageVeil) next.clear();
+      next.add(item.id);
+    }
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => AccessoryDetailsScreen(
           item: item,
           isSelected: selected.contains(item.id),
+          priceText: widget.service.packageVeil
+              ? widget.catalogue.stylePrice(widget.service, item)
+              : null,
           unavailableReason: unavailableReason(item),
-          allowanceCents: widget.service.allowanceCents,
+          allowanceCents: widget.service.usesAccessoryAllowance
+              ? widget.service.allowanceCents
+              : null,
           resultingExtraCents: widget.catalogue.extra(widget.service, next),
           changeCents:
               widget.catalogue.extra(widget.service, next) -
@@ -236,6 +299,15 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
   @override
   Widget build(BuildContext context) {
     final all = widget.catalogue.choices(widget.service);
+    final valid = all
+        .where((item) => selected.contains(item.id) && canSelect(item))
+        .map((item) => item.id)
+        .toSet();
+    final complete =
+        valid.isNotEmpty &&
+        valid.length == selected.length &&
+        (!widget.service.packageVeil || valid.length == 1);
+    final clearing = selected.isEmpty && widget.initial.isNotEmpty;
     final categories = ['All', ...all.map((i) => i.category).toSet()];
     final visible = all
         .where(
@@ -263,16 +335,27 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                '${selected.length} selected · ${packageMoney(widget.catalogue.subtotal(selected))} value',
+                '${valid.length} selected · ${packageMoney(widget.service.packageVeil ? widget.catalogue.extra(widget.service, valid) : widget.catalogue.subtotal(valid))}${widget.service.packageVeil ? ' extra' : ''}',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
-              Text(
-                'Allowance ${packageMoney(widget.service.allowanceCents)} · extra ${packageMoney(widget.catalogue.extra(widget.service, selected))}',
-              ),
+              if (widget.service.usesAccessoryAllowance)
+                Text(
+                  'Allowance ${packageMoney(widget.service.allowanceCents)} · extra ${packageMoney(widget.catalogue.extra(widget.service, selected))}',
+                ),
+              if (!complete)
+                Text(
+                  all.isEmpty
+                      ? 'No styles with confirmed pricing are available.'
+                      : 'Choose an available style to continue.',
+                ),
               const SizedBox(height: 10),
               FilledButton(
-                onPressed: () => Navigator.pop(context, selected),
-                child: const Text('Use these accessories'),
+                onPressed: complete || clearing
+                    ? () => Navigator.pop(context, valid)
+                    : null,
+                child: Text(
+                  clearing ? 'Clear accessories' : 'Use these accessories',
+                ),
               ),
             ],
           ),
@@ -291,9 +374,7 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
                 ).textTheme.headlineMedium?.copyWith(fontFamily: 'LuvlySerif'),
               ),
               const SizedBox(height: 10),
-              const Text(
-                'Explore by category, compare styles and build your own combination. Prices are for three days; your service allowance is deducted automatically.',
-              ),
+              const Text('Compare available styles for your three-day rental.'),
               const SizedBox(height: 12),
               const Text(
                 'ACCESSORY STYLE GUIDE',
@@ -404,7 +485,10 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
                                         ),
                                         const SizedBox(height: 6),
                                         Text(
-                                          '${packageMoney(i.price)} / 3 days',
+                                          widget.catalogue.stylePrice(
+                                            widget.service,
+                                            i,
+                                          ),
                                         ),
                                         if (!canSelect(i))
                                           Text(
@@ -462,10 +546,13 @@ class AccessoryDetailsScreen extends StatelessWidget {
     required this.resultingExtraCents,
     required this.changeCents,
     this.unavailableReason,
+    this.priceText,
   });
   final AccessoryItem item;
   final bool isSelected;
-  final int allowanceCents, resultingExtraCents, changeCents;
+  final String? priceText;
+  final int? allowanceCents;
+  final int resultingExtraCents, changeCents;
   final String? unavailableReason;
 
   @override
@@ -541,7 +628,7 @@ class AccessoryDetailsScreen extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                packageMoney(item.price),
+                priceText ?? packageMoney(item.price),
                 style: theme.textTheme.titleLarge?.copyWith(
                   color: theme.colorScheme.primary,
                   fontWeight: FontWeight.w600,
@@ -554,31 +641,32 @@ class AccessoryDetailsScreen extends StatelessWidget {
               _detail(context, 'Material', item.material),
               _detail(context, 'Size & fit', item.size),
               const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0xffF5EEEB),
-                  borderRadius: BorderRadius.circular(12),
+              if (allowanceCents != null)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xffF5EEEB),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Your package allowance',
+                        style: theme.textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${packageMoney(allowanceCents!)} is already included for this service. Only the excess is added.',
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Service surcharge after ${isSelected ? 'removing' : 'adding'} this style: ${packageMoney(resultingExtraCents)}',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Your package allowance',
-                      style: theme.textTheme.titleSmall,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '${packageMoney(allowanceCents)} is already included for this service. Only the excess is added.',
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Service surcharge after ${isSelected ? 'removing' : 'adding'} this style: ${packageMoney(resultingExtraCents)}',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ],
-                ),
-              ),
               const SizedBox(height: 16),
               const Text(
                 'Style preview · confirm fit and final details at your fitting.',

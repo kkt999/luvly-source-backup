@@ -243,9 +243,82 @@ void main() {
         find.text('Edit Dress'),
         role == PortalRole.manager ? findsOneWidget : findsNothing,
       );
+      final delete = find.text('Delete dress');
+      expect(
+        delete,
+        role == PortalRole.manager ? findsOneWidget : findsNothing,
+      );
+      if (role == PortalRole.manager) {
+        await tester.ensureVisible(delete);
+        await tester.pumpAndSettle();
+        await tester.tap(delete);
+        await tester.pumpAndSettle();
+        expect(find.text('Permanently delete dress?'), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(repo.records, hasLength(1));
+      }
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets(
+    'Manager can unpublish from inventory without deleting the dress record',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final original = sampleDress();
+      final repo = FakeCatalogue()..records[original.id] = original;
+      final model = PortalModel.live(
+        member: TeamMember(
+          'manager',
+          'Manager',
+          'manager@example.com',
+          PortalRole.manager,
+        ),
+      );
+      addTearDown(model.dispose);
+      addTearDown(repo.changes.close);
+      await tester.pumpWidget(
+        CatalogueScope(
+          repository: repo,
+          child: PortalScope(
+            model: model,
+            child: MaterialApp(
+              theme: portalTheme,
+              home: const Scaffold(body: LiveInventoryPage()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('View'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('View'));
+      await tester.pumpAndSettle();
+      final action = find.text('Unpublish dress');
+      await tester.ensureVisible(action);
+      await tester.pumpAndSettle();
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(repo.saves, 0);
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Unpublish'));
+      await tester.pumpAndSettle();
+      expect(repo.saves, 1);
+      expect(repo.records[original.id]!.toFields(), {
+        ...original.toFields(),
+        'published': false,
+      });
+      expect((await repo.watch(inventory: false).first).dresses, isEmpty);
+      expect(find.text('Visible to staff only'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'Manager saves a draft, publishes, and bride sees exact details',

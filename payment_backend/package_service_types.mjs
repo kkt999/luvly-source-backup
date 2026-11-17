@@ -1,13 +1,17 @@
 export const scheduledServiceTypes = new Set([
   'makeup-hair', 'makeup-trial', 'second-beauty-look', 'portrait-session', 'extra-fitting',
 ]);
-const accessoryTypes = new Set(['veil-rental', 'accessory-rental', 'veil-accessories']);
+const accessoryTypes = new Set(['veil-rental', 'accessory-rental', 'veil-accessories', 'package-veil', 'item-priced-accessories']);
 export const packageServiceTypes = new Set([
   'custom', 'extra-rental-day', ...scheduledServiceTypes, ...accessoryTypes,
 ]);
 
 export const requiresServiceTiming = service =>
   scheduledServiceTypes.has(service.serviceType ?? service.id);
+export const accessoryPricing = service => ({
+  'package-veil': 'package',
+  'item-priced-accessories': 'per-item',
+})[service.serviceType] ?? 'allowance';
 export const requiresAccessorySelection = service =>
   accessoryTypes.has(service.serviceType ?? service.id);
 export const addsRentalDay = service => service.serviceType === undefined
@@ -19,7 +23,7 @@ export function accessoryCategories(service) {
     return { veils: /veil/i.test(service.name), jewellery: /accessor|jewel|tiara/i.test(service.name) };
   }
   return {
-    veils: ['veil-rental', 'veil-accessories'].includes(service.serviceType),
-    jewellery: ['accessory-rental', 'veil-accessories'].includes(service.serviceType),
+    veils: ['veil-rental', 'veil-accessories', 'package-veil'].includes(service.serviceType),
+    jewellery: ['accessory-rental', 'veil-accessories', 'item-priced-accessories'].includes(service.serviceType),
   };
 }

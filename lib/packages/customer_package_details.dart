@@ -276,9 +276,16 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
                     ),
                   for (final charge
                       in s.data['accessoryCharges'] as List? ?? [])
-                    Text(
-                      '${charge['serviceName']} · allowance applied ${packageMoney(charge['appliedAllowanceCents'])} · extra ${packageMoney(charge['extraCents'])}',
-                    ),
+                    Text(switch (charge['pricing']) {
+                      'per-item' =>
+                        '${charge['serviceName']} · ${packageMoney(charge['extraCents'])}',
+                      'package' =>
+                        (charge['extraCents'] as int? ?? 0) > 0
+                            ? 'Veil upgrade · + ${packageMoney(charge['extraCents'])}'
+                            : '${charge['serviceName']} · Included',
+                      _ =>
+                        '${charge['serviceName']} · allowance applied ${packageMoney(charge['appliedAllowanceCents'])} · extra ${packageMoney(charge['extraCents'])}',
+                    }),
                 ],
               ),
               if (s.appointments.isNotEmpty)

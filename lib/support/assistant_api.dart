@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/services.dart';
 import '../payments/payment_api.dart';
+import 'assistant_strings.dart';
 
 class AssistantReply {
   const AssistantReply({
@@ -100,29 +101,60 @@ class LuvlyAssistantApi implements AssistantApi {
   void close() => transport.close();
 }
 
+String? _messageLanguage(String question) {
+  final text = question
+      .replaceAll(
+        RegExp(r'\[(?:email|number|link) removed\]', caseSensitive: false),
+        '',
+      )
+      .trim();
+  if (RegExp(r'[\u3400-\u9fff]', unicode: true).hasMatch(text)) return 'zh';
+  if (RegExp(
+    r'\b(saya|awak|anda|boleh|berapa(?:kah)?|bagaimana(?:kah)?|bila(?:kah)?|gaun|sewaan?|menyewa|bayaran?|membayar|janji temu|saiz|stok|batal(?:kan)?|tempah(?:an)?|menempah|cuba|mencuba|kahwin|terima kasih|selamat pagi|nak|patut)\b',
+    caseSensitive: false,
+  ).hasMatch(text)) {
+    return 'ms';
+  }
+  final words = text
+      .replaceAll(RegExp(r'[^A-Za-z]+'), ' ')
+      .trim()
+      .toLowerCase();
+  if (words.isEmpty ||
+      RegExp(
+        r'^(?:(?:ok(?:ay)?|hmm|oh|ah|rm|myr|yes|no|sure)\s*)+$',
+      ).hasMatch(words)) {
+    return null;
+  }
+  return 'en';
+}
+
+String assistantGuideLanguage(
+  String preference,
+  String message,
+  List<String> history,
+) {
+  if (assistantSupports(preference)) return preference;
+  final current = _messageLanguage(message);
+  if (current != null) return current;
+  for (final question in history.reversed.take(4)) {
+    if (assistantPrivacyBlocked(question)) continue;
+    final recent = _messageLanguage(question);
+    if (recent != null) return recent;
+  }
+  return 'en';
+}
+
 Future<AssistantReply> localHelp(
   String message,
   List<String> history,
   String language,
 ) async {
-  final lang = ['en', 'zh', 'ms'].contains(language)
-      ? language
-      : RegExp(r'[\u3400-\u9fff]', unicode: true).hasMatch(message)
-      ? 'zh'
-      : RegExp(
-          r'\b(saya|boleh|berapa|gaun|sewa|bayar|janji|saiz|stok|batal)\b',
-          caseSensitive: false,
-        ).hasMatch(message)
-      ? 'ms'
-      : 'en';
+  final lang = assistantGuideLanguage(language, message, history);
+  final strings = AssistantStrings(lang);
   if (assistantPrivacyBlocked(message) ||
       history.any(assistantPrivacyBlocked)) {
     return AssistantReply(
-      answer: lang == 'zh'
-          ? '请勿发送密码、验证码、API 密钥或银行／银行卡资料。这条消息没有发送给 AI。'
-          : lang == 'ms'
-          ? 'Jangan hantar kata laluan, kod pengesahan, kunci API atau butiran bank/kad. Mesej ini tidak dihantar kepada AI.'
-          : 'Please do not send passwords, verification codes, API keys or bank/card details. This message was not sent to AI.',
+      answer: strings[AssistantText.privacyReply],
       mode: 'Guide',
       handoff: true,
       sources: const [],
@@ -162,11 +194,7 @@ Future<AssistantReply> localHelp(
       ).hasMatch(message.toLowerCase())) {
     found = match(history.last);
   }
-  final fallback = lang == 'zh'
-      ? '我可以说明试穿、付款、租期、配饰、尺码、日历和收据。涉及你的具体订单或退款，请联系人工客服。'
-      : lang == 'ms'
-      ? 'Saya boleh menerangkan sesi mencuba, bayaran, sewaan, aksesori, saiz, Calendar dan resit. Hubungi staf untuk pesanan atau bayaran balik peribadi.'
-      : 'I can explain fittings, payments, rental dates, accessories, sizes, Calendar and receipts. Contact our team for your own order or refund.';
+  final fallback = strings[AssistantText.guideIntro];
   return AssistantReply(
     answer: found.isEmpty
         ? fallback

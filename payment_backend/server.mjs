@@ -15,6 +15,7 @@ import { PackageRentals } from './package_rentals.mjs';
 import {BookingService} from './booking_service.mjs';
 import {gmailMail} from './appointment_mail.mjs';
 import {SupportAssistant,helpGuide} from './support_assistant.mjs';
+import {AssistantConversations} from './assistant_conversations.mjs';
 import {geminiConfig,GeminiHelpGateway} from './gemini_assistant.mjs';
 import {PromotionService} from './promotions.mjs';
 import {AnalyticsService} from './analytics.mjs';
@@ -30,6 +31,7 @@ import {RecommendationProfilesService} from './recommendation_profiles.mjs';
 import {CustomerReviews} from './customer_reviews.mjs';
 import {ReviewMediaBucket} from './review_media.mjs';
 import {ReviewTextModeration} from './review_text_moderation.mjs';
+import {DressArService, DressArStorage, TripoDressGateway} from './tripo_dress_models.mjs';
 import {prepareCloudConfig,maintenance,scheduledHandler} from './cloud_runtime.mjs';
 import {FirestoreCalendarCoordination} from './calendar_coordination.mjs';
 
@@ -73,6 +75,7 @@ try {
   const packageRentals = new PackageRentals({store,rentals,paymentPolicy:true});
   const assistant=new SupportAssistant({store,access:uid=>service.access(uid),provider:'Gemini',consentVersion:3,
     config:()=>geminiConfig(resolve(secretDirectory,'gemini-config.json')),gateway:config=>new GeminiHelpGateway(config,{guide:helpGuide})});
+  const assistantConversations=new AssistantConversations({store,assistant,access:uid=>service.access(uid)});
   let mail;
   try{mail=gmailMail(getFirestore(app),resolve(secretDirectory,'mail-config.json'));}
   catch{console.error('Appointment email setup unavailable; bookings remain active.');}
@@ -82,8 +85,11 @@ try {
   const profilePhotos=new ProfilePhotosService({store,access:(tx,uid)=>workspace.account(tx,uid)});
   const recommendationProfiles=new RecommendationProfilesService({store,access:(tx,uid)=>workspace.account(tx,uid)});
   const {getStorage}=await import('firebase-admin/storage');
+  const bucket=getStorage(app).bucket('luvly-44c77.firebasestorage.app');
+  const dressAr=new DressArService({store, gateway:new TripoDressGateway(env.TRIPO_API_KEY?.trim()),
+    storage:new DressArStorage(bucket)});
   const reviewModerator=new ReviewTextModeration({store,config:()=>geminiConfig(resolve(secretDirectory,'gemini-config.json'))});
-  const reviews=new CustomerReviews({store,moderator:reviewModerator,bucket:new ReviewMediaBucket(getStorage(app).bucket('luvly-44c77.firebasestorage.app'))});
+  const reviews=new CustomerReviews({store,moderator:reviewModerator,bucket:new ReviewMediaBucket(bucket)});
   let calendar;
   const calendarConfig = resolve(secretDirectory, 'calendar-config.json');
   if (existsSync(calendarConfig)) {
@@ -99,7 +105,7 @@ try {
       }
     } catch { console.error('Calendar setup unavailable; payment and package services remain active.'); }
   }
-  const handler=createHandler({ service, packages, packageRentals, calendar, rentals, bookings, workforce, staffAccounts, workspace, profilePhotos, recommendationProfiles, reviews, assistant, promotions, analytics, analyticsEvents, customerPlanning, fittingWorkflow, directory:directoryService, verifyToken: token => getAuth(app).verifyIdToken(token, true), allowedOrigins: origins });
+  const handler=createHandler({ service, packages, packageRentals, calendar, rentals, bookings, workforce, staffAccounts, workspace, profilePhotos, recommendationProfiles, reviews, dressAr, assistant, assistantConversations, promotions, analytics, analyticsEvents, customerPlanning, fittingWorkflow, directory:directoryService, verifyToken: token => getAuth(app).verifyIdToken(token, true), allowedOrigins: origins });
   const server = createServer(cloud?scheduledHandler({handler,run:()=>maintenance({db:getFirestore(app),store,rentals,bookings,calendar,mail,reviews}),audience:env.MAINTENANCE_AUDIENCE,email:env.MAINTENANCE_EMAIL}):handler);
   server.requestTimeout = 120000; // Authenticated, two-at-a-time 20 MB review uploads.
   server.headersTimeout = 15000;

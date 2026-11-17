@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {GeminiHelpGateway,geminiConfig,geminiModel,validateGeminiAnswer,needsPersonalSupport} from './gemini_assistant.mjs';
-import {SupportAssistant,helpGuide,safeQuestion} from './support_assistant.mjs';
+import {SupportAssistant,assistantLanguage,helpGuide,safeQuestion} from './support_assistant.mjs';
 
 const config={provider:'Gemini',model:geminiModel,apiKey:'test-only-not-a-real-key-0123456789',dailyRequestLimit:10,perUserDailyLimit:5};
 const answer={kind:'answer',answer:'Yes — the RM50 fitting fee can be credited once after you attend your fitting.',articleIds:['fitting'],handoff:false};
@@ -41,6 +41,59 @@ test('Gemini request is fixed-origin, stateless, text-only, bounded and has no t
  assert.equal(body.generationConfig.maxOutputTokens,1536);assert.equal(body.generationConfig.candidateCount,1);
  assert.deepEqual(JSON.parse(body.contents[0].parts[0].text),{recentQuestions:['How much is a first fitting?'],currentQuestion:'Can that fee be credited?'});
  assert.match(body.systemInstruction.parts[0].text,/APPROVED POLICY DATA/);assert.doesNotMatch(JSON.stringify(body),/untouched|amountCents|apiKey/);
+});
+test('explicit response languages use trusted system instructions and Malaysian terminology',async()=>{
+ const examples=[
+  ['en',/Reply in English/, 'The fitting fee is RM50.'],
+  ['zh',/Simplified Chinese with natural wording for Malaysian customers/, '试穿费为 RM50。'],
+  ['ms',/Malaysian Bahasa Melayu \(Bahasa Malaysia\)/, 'Bayaran sesi mencuba ialah RM50.'],
+ ];
+ for(const [language,instruction,expected] of examples){
+  const gateway=new GeminiHelpGateway(config,{guide:helpGuide,fetchImpl:async(_url,options)=>{
+   const contents=JSON.parse(options.body);
+   assert.match(contents.systemInstruction.parts[0].text,instruction);
+   assert.doesNotMatch(contents.systemInstruction.parts[0].text,/My sample question/);
+   return Response.json(response({...answer,answer:expected}));
+  }});
+  assert.equal((await gateway.route('My sample question',[],language)).answer,expected);
+ }
+});
+test('Auto infers a fallback from bounded context and accepts only a supported Gemini response language',async()=>{
+ assert.equal(assistantLanguage('auto','试穿费多少钱？'),'zh');
+ assert.equal(assistantLanguage('auto','Bilakah saya boleh menempah sesi mencuba?'),'ms');
+ assert.equal(assistantLanguage('auto','What is the deposit?',['试穿费多少钱？']),'en');
+ assert.equal(assistantLanguage('auto','RM50?',['试穿费多少钱？']),'zh');
+ assert.equal(assistantLanguage('en','试穿费多少钱？'),'en');
+ const calls=[];
+ let language='ms';
+ const gateway=new GeminiHelpGateway(config,{guide:helpGuide,fetchImpl:async(_url,options)=>{
+  calls.push(JSON.parse(options.body));
+  return Response.json(response({...answer,answer:'Bayaran sesi mencuba ialah RM50.',language}));
+ }});
+ const reply=await gateway.route('RM50?',['Berapa bayaran sesi mencuba?'],'en',null,{autoLanguage:true});
+ assert.equal(reply.language,'ms');
+ assert.match(calls[0].systemInstruction.parts[0].text,/recent questions/);
+ assert.match(calls[0].systemInstruction.parts[0].text,/supported languages are English/);
+ assert.deepEqual(JSON.parse(calls[0].contents[0].parts[0].text),{
+  recentQuestions:['Berapa bayaran sesi mencuba?'],currentQuestion:'RM50?',
+ });
+ language='id';
+ await assert.rejects(gateway.route('RM50?',[],'en',null,{autoLanguage:true}),/AI_INVALID_REPLY_LANGUAGE/);
+ await assert.rejects(gateway.route('RM50?',[],'en'),/AI_INVALID_REPLY/);
+});
+test('Auto assembles policy citations in the language chosen by Gemini and keeps the same conversation context',async()=>{
+ const calls=[];
+ const f=fixture({gateway:()=>({route:async(...args)=>{
+  calls.push(args);
+  return {answer:'试穿费为 RM50。',articleIds:['fitting'],handoff:false,language:'zh'};
+ }})});
+ const reply=await f.assistant.ask('bride',input({language:'auto',message:'RM50?',history:['试穿费是多少钱？']}),{conversationId:'b'.repeat(32)});
+ assert.equal(calls[0][2],'zh');
+ assert.deepEqual(calls[0][4],{autoLanguage:true});
+ assert.equal(reply.language,'zh');
+ assert.equal(reply.sources[0].title,helpGuide.articles.find(article=>article.id==='fitting').title.zh);
+ assert.equal((await f.assistant.ask('bride',input({language:'ms',requestId:'c'.repeat(32)}))).language,'ms');
+ assert.deepEqual(calls[1][4],{autoLanguage:false});
 });
 test('unsupported money, unknown citations, tool-like extra fields, invented action claims, links and invalid greetings are rejected',()=>{
  for(const patch of [{answer:'The fee is RM999.'},{articleIds:['invented']},{articleIds:[]},{articleIds:['fitting','fitting']},{answer:'I have confirmed your booking.'},{answer:'已为你退款'},{answer:'Visit https://example.com'},{answer:'<script>run()</script>'},{kind:'greeting',articleIds:[],answer:'Here is unrelated advice'}])assert.throws(()=>validateGeminiAnswer({...answer,...patch},helpGuide,'en','fitting?'));

@@ -1148,6 +1148,7 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
   final removed = <String>{}, addons = <String>{};
   final accessoryChoices = <String, Set<String>>{};
   AccessoryCatalogue? accessoryCatalogue;
+  bool loadingAccessoryCatalogue = true;
   bool loadingSavedGowns = false;
   @override
   void initState() {
@@ -1158,18 +1159,36 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
         previous?.data['packageId'] == widget.package.id;
     if (previous != null && samePackage) {
       customize = true;
+      final currentServices = {
+        for (final service in widget.package.services) service.id: service,
+      };
+      final oldServices = {
+        for (final service in previous.services) service.id: service,
+      };
       removed.addAll(
-        (previous.data['removedServices'] as List? ?? []).map(
-          (s) => s['id'] as String,
-        ),
+        (previous.data['removedServices'] as List? ?? [])
+            .map((s) => s['id'] as String)
+            .where((id) => currentServices[id]?.kind == 'Optional'),
       );
       addons.addAll(
-        previous.services.where((s) => s.kind == 'Add-on').map((s) => s.id),
+        previous.services
+            .where(
+              (s) =>
+                  s.kind == 'Add-on' &&
+                  currentServices[s.id]?.kind == 'Add-on' &&
+                  currentServices[s.id]?.serviceType == s.serviceType,
+            )
+            .map((s) => s.id),
       );
       for (final a in previous.data['selectedAccessories'] as List? ?? []) {
-        accessoryChoices
-            .putIfAbsent(a['serviceId'] as String, () => {})
-            .add(a['id'] as String);
+        final id = a['serviceId'] as String;
+        final service = currentServices[id];
+        if (service == null ||
+            !service.isAccessory ||
+            service.serviceType != oldServices[id]?.serviceType) {
+          continue;
+        }
+        accessoryChoices.putIfAbsent(id, () => {}).add(a['id'] as String);
       }
     }
     if (previous != null && previous.selectedGowns.isNotEmpty) {
@@ -1212,43 +1231,91 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
     }
     AccessoryCatalogue.load()
         .then((c) {
-          if (mounted) setState(() => accessoryCatalogue = c);
+          if (mounted) {
+            setState(() {
+              accessoryCatalogue = c;
+              loadingAccessoryCatalogue = false;
+            });
+          }
         })
         .catchError((Object e) {
           if (mounted) {
-            setState(
-              () => error =
-                  'Could not load accessory catalogue. Reopen this package to retry.',
-            );
+            setState(() => loadingAccessoryCatalogue = false);
           }
         });
   }
 
-  int get accessoryExtra => widget.package.services
-      .where(included)
+  Iterable<PackageServiceItem> get selectedAccessoryServices => widget
+      .package
+      .services
+      .where((service) => isAccessory(service) && included(service));
+  Set<String> accessoryIds(PackageServiceItem service) =>
+      accessoryChoices[service.id] ??
+      {if (service.standardVeilId case final String id) id};
+  Set<String> validAccessoryIds(PackageServiceItem service) {
+    final selected = accessoryIds(service);
+    return {
+      for (final item
+          in accessoryCatalogue?.choices(service) ?? <AccessoryItem>[])
+        if (selected.contains(item.id) &&
+            (!dateFirst ||
+                availability == null ||
+                availability!.accessories[item.id] == 'Available'))
+          item.id,
+    };
+  }
+
+  int get accessoryExtra => selectedAccessoryServices.fold(
+    0,
+    (total, service) =>
+        total +
+        (accessoryCatalogue?.extra(service, validAccessoryIds(service)) ?? 0),
+  );
+  int get veilUpgrade => selectedAccessoryServices
+      .where((s) => s.packageVeil)
       .fold(
         0,
-        (n, s) =>
-            n +
-            (accessoryCatalogue?.extra(s, accessoryChoices[s.id] ?? {}) ?? 0),
+        (total, s) =>
+            total + (accessoryCatalogue?.extra(s, validAccessoryIds(s)) ?? 0),
       );
-  int get accessoryValue => widget.package.services
-      .where(included)
+  int get accessoryValue => selectedAccessoryServices
+      .where((service) => !service.packageVeil)
       .fold(
         0,
-        (n, s) =>
-            n +
-            (accessoryCatalogue?.subtotal(accessoryChoices[s.id] ?? {}) ?? 0),
+        (total, service) =>
+            total +
+            (accessoryCatalogue?.subtotal(validAccessoryIds(service)) ?? 0),
       );
-  bool get accessoriesAvailable =>
-      !dateFirst ||
-      accessoryPayload.every(
-        (item) => availability?.accessories[item['itemId']] == 'Available',
-      );
+  String? get accessoryValidation {
+    for (final service in selectedAccessoryServices) {
+      if (loadingAccessoryCatalogue) return 'Loading accessory prices…';
+      if (accessoryCatalogue == null) {
+        return 'Accessory pricing is unavailable. Reopen this package to retry.';
+      }
+      if (dateFirst &&
+          availability != null &&
+          (service.itemPriced || service.packageVeil) &&
+          availability!.accessoryCatalogueVersion !=
+              accessoryCatalogue!.version) {
+        return 'Accessory prices could not be verified. Refresh the package and check for an app update.';
+      }
+      final valid = validAccessoryIds(service);
+      final count = accessoryIds(service).length;
+      if (valid.length != count) {
+        return 'A selected style is unavailable or no longer priced. Edit accessories to choose an available style.';
+      }
+      if (valid.isEmpty || (service.packageVeil && valid.length != 1)) {
+        return service.kind == 'Required'
+            ? 'Choose an available style for ${service.name} to continue.'
+            : 'Please choose at least one available style for ${service.name} or remove the service to continue.';
+      }
+    }
+    return null;
+  }
+
   List<Map<String, dynamic>> get accessoryPayload => [
     for (final s in widget.package.services.where(included))
-      for (final id in accessoryChoices[s.id] ?? <String>{})
-        {'serviceId': s.id, 'itemId': id},
+      for (final id in accessoryIds(s)) {'serviceId': s.id, 'itemId': id},
   ];
   bool isAccessory(PackageServiceItem s) => s.isAccessory;
   bool included(PackageServiceItem s) =>
@@ -1290,7 +1357,11 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
       builder: (c) => AlertDialog(
         title: Text('$action ${s.name}?'),
         content: Text(
-          s.kind == 'Add-on'
+          s.itemPriced
+              ? (selected
+                    ? 'Choose the accessories you would like to rent.'
+                    : 'Remove the selected accessories and their charges?')
+              : s.kind == 'Add-on'
               ? '${packageMoney(s.priceCents)} ${selected ? 'will be added to' : 'will be removed from'} your total.'
               : '${packageMoney(s.priceCents)} ${selected ? 'will be restored to' : 'will be deducted from'} your total.',
         ),
@@ -1333,19 +1404,9 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
   Future<void> submit() async {
     if (loadingSavedGowns || checkingAvailability || busy) return;
     if (dateFirst && (!await checkAvailability() || !selectedAvailable)) return;
-    if (!accessoriesAvailable) {
-      final names = accessoryCatalogue?.items
-          .where(
-            (item) =>
-                accessoryPayload.any((p) => p['itemId'] == item.id) &&
-                availability?.accessories[item.id] != 'Available',
-          )
-          .map((i) => i.name)
-          .join(', ');
-      setState(
-        () => error =
-            '${names?.isNotEmpty == true ? names : 'Selected accessories'}: not available for these dates. Edit accessories to remove or replace these styles.',
-      );
+    final issue = accessoryValidation;
+    if (issue != null) {
+      setState(() => error = issue);
       return;
     }
     if (gowns.length != widget.package.includedGownCount) {
@@ -1356,7 +1417,10 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
       return;
     }
     if (!review) {
-      setState(() => review = true);
+      setState(() {
+        review = true;
+        error = null;
+      });
       return;
     }
     if (busy) return;
@@ -1501,7 +1565,7 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
                   ? 'Choose rental dates before choosing gowns.'
                   : gowns.length < p.includedGownCount
                   ? 'Select each included gown and its size before review.'
-                  : null,
+                  : accessoryValidation,
               label: busy
                   ? 'Saving…'
                   : loadingSavedGowns
@@ -1536,6 +1600,14 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
               padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
               children: [
                 PackageDetailsHeader(package: p, showCover: !review),
+                if (widget.revising?.data['packageRevision']
+                    case final int revision when revision != p.revision)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 12),
+                    child: Text(
+                      'Package pricing or services have changed. Review the updated choices and total before saving.',
+                    ),
+                  ),
                 const SizedBox(height: 16),
                 if (includes.isNotEmpty) ...[
                   PackageIncludes(items: includes),
@@ -1697,6 +1769,7 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
                   removed: removed,
                   addons: addons,
                   accessoryExtraCents: accessoryExtra,
+                  veilUpgradeCents: veilUpgrade,
                   accessoryValueCents: accessoryValue,
                   showPaymentEstimate: !widget.readOnly,
                   datesChecked: dateFirst,
@@ -1729,7 +1802,9 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
         !required &&
         (customize || isAccessory(service) || service.requiresTeamScheduling);
     final price = packageMoney(service.priceCents);
-    final subtitle = required
+    final subtitle = service.itemPriced
+        ? 'Optional · Pay for selected items'
+        : required
         ? 'Mandatory · included'
         : addOn
         ? '${selected ? 'Added · ' : ''}+ $price'
@@ -1821,7 +1896,7 @@ class _PackageChoiceState extends State<PackageChoiceScreen> {
             key: ValueKey('accessories-${service.id}'),
             catalogue: catalogue,
             service: service,
-            selected: accessoryChoices[service.id] ?? const {},
+            selected: accessoryIds(service),
             readOnly: review || busy,
             availability: dateFirst ? availability?.accessories ?? {} : null,
             onChanged: (values) => setState(() {

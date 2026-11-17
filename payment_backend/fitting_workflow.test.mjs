@@ -19,6 +19,8 @@ class Store{
   async completedDressTrials(uid){return (await this.list('appointments',uid)).filter(b=>b.type==='Dress Trial'&&b.status==='Completed');}
   atomic(fn){const run=this.queue.then(async()=>{let writing=false;const writes=new Map();const value=await fn({
     get:p=>{assert.equal(writing,false,'read before writes');return this.get(p);},
+    staffRoster:()=>this.list('staff'),
+    makeupTrialAppointments:uid=>this.list('appointments',uid),
     set:(p,v)=>{writing=true;writes.set(p,structuredClone(v));},delete:p=>{writing=true;writes.set(p,null);}});
     for(const[p,v]of writes)if(v===null)this.data.delete(p);else this.data.set(p,v);return value;});this.queue=run.catch(()=>{});return run;}
 }
@@ -152,6 +154,17 @@ test('replacement options HTTP route requires authentication and rejects forged 
   assert.equal((await send('',{})).status,401);assert.equal((await send('',{},'bride')).status,403);
   assert.equal((await send('',{uid:'bride'},'staff')).status,400);assert.equal((await send('?uid=bride',{},'staff')).status,400);
   assert.equal((await send('',{},'staff')).status,200);assert.deepEqual([...f.store.data],before);
+});
+test('makeup options HTTP route requires operations access and rejects query overrides',async t=>{
+  const f=fixture();
+  const server=createServer(createHandler({service:f.payments,fittingWorkflow:f.fitting,verifyToken:async token=>({uid:token})}));
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>server.close());
+  const url=`http://127.0.0.1:${server.address().port}/v1/package-selections/${sid}/fitting-makeup-options`;
+  const get=(suffix,token)=>fetch(url+suffix,{headers:token?{authorization:`Bearer ${token}`}:{}});
+  assert.equal((await get('')).status,401);
+  assert.equal((await get('','bride')).status,403);
+  assert.equal((await get('?uid=bride','staff')).status,400);
+  assert.deepEqual(await (await get('','staff')).json(),{artists:[],trials:[]});
 });
 test('customer consent and staff approval are separate; no customer or inactive staff can approve',async()=>{
   const f=fixture();await assert.rejects(f.fitting.choice('other',sid,{mode:'SkipFitting',accepted:true,revision:0}),fail('SELECTION_ACCESS_DENIED'));
@@ -360,6 +373,52 @@ test('staff must arrange selected services and dated accessories before the cust
   const accepted=await f.fitting.respond('bride',sid,{...response,servicePlanVersion:1});
   assert.deepEqual(accepted.fittingQuote.servicePlan,fittingQuote.servicePlan);
   assert.equal(accepted.fittingQuote.state,'Accepted');
+});
+test('makeup arrangements use the event day and the customer’s confirmed trial details',async()=>{
+  const f=fixture(),fittingVisit=await modernVisit(f);
+  const path=`packageSelections/${sid}`,s=f.store.data.get(path);
+  s.services=[
+    {id:'beauty',serviceType:'makeup-hair',name:'Makeup',kind:'Optional'},
+    {id:'trial-service',serviceType:'makeup-trial',name:'Trial',kind:'Add-on'},
+  ];
+  f.store.data.set('staff/artist',{active:true,role:'staff',name:'Test Artist'});
+  f.store.data.set('staffScheduling/artist',{jobRole:'MakeupArtist',serviceTypes:['Bridal Makeup']});
+  const visit={uid:'bride',status:'Confirmed',type:'Makeup Trial',assignedStaffId:'artist',revision:3,
+    startAt:new Date('2026-10-18T06:00:00Z')};
+  f.store.data.set('appointments/trial',visit);
+  f.store.data.set('appointments/other-trial',{...visit,uid:'other'});
+  f.store.data.set('appointments/same-day',{...visit,startAt:new Date('2026-10-21T02:00:00Z')});
+  f.store.data.set('appointments/cancelled',{...visit,status:'Cancelled'});
+  const options=await f.fitting.makeupOptions('staff',sid);
+  assert.deepEqual(options.artists,[{id:'artist',name:'Test Artist'}]);
+  assert.deepEqual(options.trials,[{id:'trial',day:'2026-10-18',minuteOfDay:840,artistId:'artist',artistName:'Test Artist',revision:3}]);
+  await assert.rejects(f.fitting.makeupOptions('artist',sid),fail('OPERATIONS_ACCESS_REQUIRED'));
+  const hair={serviceId:'beauty',artistId:'artist',minuteOfDay:450};
+  const linked={serviceId:'trial-service',appointmentId:'trial',appointmentRevision:3};
+  const quote={requestId:'makeup-quote',revision:0,decisionRevision:s.fittingDecisionRevision,
+    note:'The makeup and hair arrangements have been agreed.',lines:[]};
+  const send=(...serviceConfirmations)=>f.fitting.quote('staff',sid,{...quote,serviceConfirmations});
+  await assert.rejects(send(hair,{...linked,appointmentId:'other-trial'}),fail('PACKAGE_MAKEUP_TRIAL_CHANGED'));
+  await assert.rejects(send(hair,{...linked,appointmentRevision:2}),fail('PACKAGE_MAKEUP_TRIAL_CHANGED'));
+  await assert.rejects(send({...hair,artistId:'staff'},linked),fail('PACKAGE_MAKEUP_ARTIST_UNAVAILABLE'));
+  await assert.rejects(send({...hair,day:'2026-10-20'},linked),fail('PACKAGE_SERVICE_TIMING_REQUIRED'));
+  await assert.rejects(send(hair,{serviceId:'trial-service',artistId:'artist',day:'2026-10-21',minuteOfDay:630}),fail('PACKAGE_SERVICE_TIMING_REQUIRED'));
+  const {fittingQuote}=await send(hair,linked);
+  assert.equal(fittingQuote.servicePlan[0].timing,'2026-10-21 · 07:30 MYT · Test Artist');
+  assert.equal(fittingQuote.servicePlan[1].timing,'2026-10-18 · 14:00 MYT · Test Artist');
+  assert.equal(fittingQuote.servicePlan[1].schedule.appointmentId,'trial');
+  const accept={response:'Accept',revision:1,servicePlanVersion:1};
+  f.store.data.set('appointments/trial',{...visit,status:'Cancelled'});
+  await assert.rejects(f.fitting.respond('bride',sid,accept),fail('PACKAGE_MAKEUP_TRIAL_CHANGED'));
+  f.store.data.set('appointments/trial',visit);
+  const accepted=await f.fitting.respond('bride',sid,accept);
+  assert.ok(accepted.fittingQuote.servicePlan.every(row=>!row.schedule));
+  const rental={appointmentId:fittingVisit.appointmentId,requestId:'hold',planRevision:1,depositCents:39950,
+    fittingRevision:(await f.store.get(path)).fittingDecisionRevision};
+  f.store.data.set('appointments/trial',{...visit,startAt:new Date('2026-10-18T07:00:00Z')});
+  await assert.rejects(f.workflow.confirm('staff',sid,rental),fail('PACKAGE_MAKEUP_TRIAL_CHANGED'));
+  f.store.data.set('appointments/trial',{...visit,status:'Completed'});
+  assert.equal((await f.workflow.confirm('staff',sid,rental)).state,'Held');
 });
 test('all four real customer decisions complete attendance without making a deposit or consuming fitting credit',async()=>{
   for(const outcome of ['Selected','Reselect','Considering','NotProceeding']){

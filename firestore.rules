@@ -7,6 +7,11 @@ service cloud.firestore {
       allow list, create, update, delete: if false;
     }
     function owner(uid) { return request.auth != null && request.auth.uid == uid; }
+    // Cloud Run verifies the customer and scopes every operation to their UID.
+    // Direct SDK access is denied, including to customers' own records.
+    match /assistantAccounts/{uid}/{document=**} {
+      allow read, write: if false;
+    }
     function validContact(d) {
       return d.name is string && d.name.size() > 0 && d.name.size() <= 100
         && d.name.matches("[\\p{L}\\p{M} .'’/@-]+")

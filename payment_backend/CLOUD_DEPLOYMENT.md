@@ -26,6 +26,14 @@ The runtime uses Application Default Credentials, not a downloaded administrator
 key. Secret configuration is materialised with private permissions in ephemeral
 storage at startup.
 
+Tripo generation is enabled when the Cloud Run revision receives a
+`TRIPO_API_KEY` environment variable backed by Secret Manager. Give the
+runtime service account access to that secret and private read/write access to
+the existing Firebase Storage bucket. The API stores generated files under
+`dress-ar/`; it serves them through authenticated catalogue endpoints after
+Manager approval. Generated try-on requires the updated Android app. Keep the
+Tripo key out of the Flutter build and public configuration.
+
 Non-secret environment variables:
 
 - `PAYMENT_RETURN_URL`: stable API + `/return`

@@ -23,6 +23,82 @@ Future<void> tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets(
+    'standard veil is selected by default and a catalogue upgrade adds only the difference',
+    (tester) async {
+      addTearDown(
+        () => rootBundle.evict('assets/images/accessory-catalogue.json'),
+      );
+      tester.view.physicalSize = const Size(390, 950);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const veil = PackageServiceItem(
+        id: 'veil-rental',
+        name: 'Veil Rental',
+        description: '',
+        kind: 'Optional',
+        priceCents: 8000,
+        serviceType: PackageServiceType.packageVeil,
+        standardVeilId: 'veil-short',
+      );
+      final package = BridalPackage(
+        id: bridal.id,
+        name: bridal.name,
+        description: bridal.description,
+        revision: 1,
+        active: true,
+        basePriceCents: 172900,
+        services: [bridal.services.first, veil],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PackageChoiceScreen(package: package, api: FakePackages()),
+        ),
+      );
+      await tester.runAsync(AccessoryCatalogue.load);
+      await tester.pumpAndSettle();
+      final picker = find.byType(AccessoryServicePicker);
+      await tester.scrollUntilVisible(
+        picker,
+        180,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<AccessoryServicePicker>(picker).selected, {
+        'veil-short',
+      });
+      expect(find.textContaining('RM 1,729.00'), findsWidgets);
+      await tapVisible(tester, find.text('Edit veil'));
+      expect(find.textContaining('Included in the package'), findsWidgets);
+      final upgrade = find.text('+ RM 50.00 upgrade');
+      await tester.scrollUntilVisible(
+        upgrade,
+        180,
+        scrollable: find.byType(Scrollable).first,
+      );
+      final card = find
+          .ancestor(of: upgrade, matching: find.byType(Column))
+          .first;
+      await tapVisible(
+        tester,
+        find.descendant(of: card, matching: find.text('Select')),
+      );
+      await tester.tap(find.text('Use these accessories'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<AccessoryServicePicker>(picker).selected, {
+        'veil-long',
+      });
+      expect(find.textContaining('RM 1,779.00'), findsWidgets);
+      await tapVisible(
+        tester,
+        find.widgetWithText(CheckboxListTile, 'Veil Rental'),
+      );
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('RM 1,649.00'), findsWidgets);
+    },
+  );
   testWidgets('category filter, search, details and independent selection', (
     tester,
   ) async {
@@ -156,6 +232,85 @@ void main() {
     expect(picker.selected, isEmpty);
     expect(tester.takeException(), isNull);
   });
+  testWidgets(
+    'optional item-priced accessories block review until a valid style is chosen',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 950);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const extras = PackageServiceItem(
+        id: 'extras',
+        name: 'Bridal Accessories',
+        description: '',
+        kind: 'Add-on',
+        priceCents: 0,
+        serviceType: PackageServiceType.itemAccessories,
+      );
+      final p = BridalPackage(
+        id: bridal.id,
+        name: bridal.name,
+        description: bridal.description,
+        basePriceCents: 179900,
+        revision: 1,
+        active: true,
+        services: [bridal.services.first, extras],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PackageChoiceScreen(package: p, api: FakePackages()),
+        ),
+      );
+      await tester.runAsync(AccessoryCatalogue.load);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review selection'));
+      await tester.pumpAndSettle();
+      expect(find.text('Review your package'), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      final toggle = find.widgetWithText(
+        CheckboxListTile,
+        'Bridal Accessories',
+      );
+      await tapVisible(tester, toggle);
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Please choose at least one'), findsOneWidget);
+      await tester.tap(find.text('Review selection'));
+      await tester.pumpAndSettle();
+      expect(find.text('Review your package'), findsNothing);
+      await tapVisible(tester, find.text('Choose accessories'));
+      final use = find.widgetWithText(FilledButton, 'Use these accessories');
+      expect(tester.widget<FilledButton>(use).onPressed, isNull);
+      await tapVisible(tester, find.widgetWithText(ChoiceChip, 'Rings'));
+      await tapVisible(tester, find.text('Select').first);
+      await tester.tap(use);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('RM 1,819.00'), findsWidgets);
+      await tapVisible(tester, find.text('Edit accessories (1)'));
+      expect(find.textContaining('1 selected · RM 20.00'), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review selection'));
+      await tester.pumpAndSettle();
+      expect(find.text('Review your package'), findsOneWidget);
+      expect(find.textContaining('RM 1,819.00'), findsWidgets);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('Edit accessories (1)'));
+      await tapVisible(tester, find.widgetWithText(ChoiceChip, 'Rings'));
+      await tapVisible(tester, find.text('Selected ✓'));
+      await tester.tap(find.text('Clear accessories'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Please choose at least one'), findsOneWidget);
+      expect(find.textContaining('RM 1,799.00'), findsWidgets);
+      await tapVisible(tester, toggle);
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('RM 1,799.00'), findsWidgets);
+      expect(find.byType(AccessoryServicePicker), findsNothing);
+    },
+  );
   for (final width in [320.0, 390.0, 1100.0]) {
     testWidgets('accessory visual ${width.toInt()}', (tester) async {
       tester.view.physicalSize = Size(width, 1000);

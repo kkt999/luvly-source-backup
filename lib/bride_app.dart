@@ -148,6 +148,9 @@ class _LuvlyAppState extends State<LuvlyApp> {
                                 navigatorKey: navigator,
                                 observer: assistantRoutes,
                                 enabled: session.phase == AccountPhase.ready,
+                                customerUid: session.phase == AccountPhase.ready
+                                    ? session.identity?.uid
+                                    : null,
                                 onContact: (draft) async {
                                   final uid = session.identity?.uid;
                                   if (session.phase != AccountPhase.ready ||

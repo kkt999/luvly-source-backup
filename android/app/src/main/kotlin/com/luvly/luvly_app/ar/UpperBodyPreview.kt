@@ -29,8 +29,9 @@ internal class UpperBodyPreview {
                     it.x in 0f..1f && it.y in 0f.. .96f })return false
             // Only a bottom crop qualifies. Missing hips in the middle of an
             // otherwise full-body frame must not bypass normal tracking checks.
-            return hips.all { it.y.isFinite() && it.y>=.96f } ||
-                (hips.all { it.confidence.isFinite() && it.confidence<.65f } && sy+span*1.3f>=.90f)
+            if(hips.any { !it.y.isFinite() || !it.confidence.isFinite() })return false
+            return hips.all { it.y>=.96f } || sy+span*1.3f>=.90f &&
+                hips.all { it.y>=.88f || it.confidence<.65f }
         }
     }
 

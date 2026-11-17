@@ -3,7 +3,8 @@ import com.luvly.luvly_app.BuildConfig
 
 data class DressAnchors(val shoulderY: Float=1.49f, val hipY: Float=.97f,
                        val shoulderWidth: Float=.40f, val adaptiveFit: Boolean=false,
-                       val bodyZ: Float=0f, val torsoOccluderOffsetZ: Float=0f)
+                       val bodyZ: Float=0f, val torsoOccluderOffsetZ: Float=0f,
+                       val lightScale: Float=1f)
 data class ArDress(val id: String,val asset: String,val label: String,
                    val anchors: DressAnchors=DressAnchors(),
                    val thumbnail: String="", val style: String="") {

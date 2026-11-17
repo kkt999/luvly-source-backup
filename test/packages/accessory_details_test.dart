@@ -38,7 +38,7 @@ void main() {
         scrollable: find.byType(Scrollable).first);
       await tester.tap(find.text('About this style'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('AI-generated illustrations'), findsOneWidget);
+      expect(find.textContaining('AI-generated style illustrations'), findsOneWidget);
       expect(find.text('Add to selection').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
     });

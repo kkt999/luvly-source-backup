@@ -22,7 +22,7 @@ class BodyTargetLockTest {
     @Test fun fastFramesCanAcquireAndReconfirmWithoutShorteningObservationWindow() {
         for(interval in listOf(33L,66L,100L))for(reacquire in listOf(false,true)) {
             val t=if(reacquire)acquired() else BodyTargetLock()
-            val start=if(reacquire)2200L else 1000L
+            val start=if(reacquire)2400L else 1000L
             var result=select(t,start,body())
             assertNull(result.index)
             var elapsed=interval
@@ -54,6 +54,27 @@ class BodyTargetLockTest {
         assertNull(select(t,3400,body()).index)
         val r=select(t,3600,body())
         assertEquals(0,r.index);assertEquals("target_reacquired",r.reason);assertTrue(r.resetAlignment)
+    }
+    @Test fun loneFrontViewAtNewDistanceGetsFreshAlignmentAfterLoss() {
+        val t=acquired()
+        val moved=body(.48f,scale=1.6f)
+        assertEquals("target_lost",select(t,1800,moved).reason)
+        assertEquals("target_reconfirming",select(t,2900,moved).reason)
+        assertNull(select(t,3650,moved).index)
+        val result=select(t,4400,moved)
+        assertEquals(0,result.index)
+        assertEquals("target_reacquired",result.reason)
+        assertTrue(result.resetAlignment)
+        assertFalse(result.retainCalibration)
+    }
+    @Test fun relocationCannotAccumulateAcrossAnAmbiguousFrame() {
+        val t=acquired()
+        val moved=body(.46f,scale=1.7f)
+        assertNull(select(t,2900,moved).index)
+        assertNull(select(t,3200,moved,body(.12f)).index)
+        assertNull(select(t,3500,moved).index)
+        assertNull(select(t,3800,moved).index)
+        assertEquals("target_reacquired",select(t,4100,moved).reason)
     }
     @Test fun briefOcclusionDoesNotRequireNewTargetOrChooseOtherBody() {
         val t=acquired()
@@ -90,6 +111,12 @@ class BodyTargetLockTest {
         val t=acquired()
         for(i in 1..8)assertEquals(0,select(t,1400+i*200L,body(.55f+i*.02f,scale=1f+i*.02f),body(.12f)).index)
     }
+    @Test fun slowFramesStillTrackTheSameBodyWithoutRestartingAlignment() {
+        val t=acquired()
+        val result=select(t,2220,body())
+        assertEquals("target_tracked",result.reason)
+        assertFalse(result.resetAlignment)
+    }
     @Test fun abruptMovementRequiresExplicitResetNotSilentTransfer() {
         val t=acquired()
         for(i in 1..6)assertNull(select(t,1400+i*200L,body(.15f)).index)
@@ -111,14 +138,31 @@ class BodyTargetLockTest {
         assertEquals(1,select(t,1800,duplicate,profile).index)
         assertEquals(0,select(t,2000,profile,duplicate).index)
     }
-    @Test fun duplicatesCannotStartOrRecoverATargetAndUncertainHeadsStillPause() {
+    @Test fun duplicateCropsCanConfirmOnePersonAtStartupAndAfterMoving() {
         val front=body()
         val duplicate=body(.56f)
         val newLock=BodyTargetLock()
-        assertEquals("target_ambiguous",select(newLock,1000,front,duplicate).reason)
-        assertEquals("target_ambiguous",select(acquired(),2200,front,duplicate).reason)
+        assertEquals("target_confirming",select(newLock,1000,front,duplicate).reason)
+        assertNull(select(newLock,1200,duplicate,front).index)
+        assertEquals("target_acquired",select(newLock,1400,front).reason)
+        val closer=body(.51f,scale=1.55f)
+        val secondCrop=body(.52f,scale=1.55f)
+        val lock=acquired()
+        assertEquals("target_lost",select(lock,2000,closer,secondCrop).reason)
+        assertEquals("target_reconfirming",select(lock,3000,closer,secondCrop).reason)
+        assertNull(select(lock,3200,closer).index)
+        val recovered=select(lock,3400,secondCrop,closer)
+        assertEquals("target_reacquired",recovered.reason)
+        assertFalse(recovered.retainCalibration)
+    }
+    @Test fun uncertainOrDistinctFacesInOverlappingCropsStillPause() {
+        val front=body()
+        val duplicate=body(.56f)
         val unreliable=duplicate.toMutableList().apply { this[0]=this[0].copy(confidence=.1f) }
         assertEquals("target_ambiguous",select(acquired(),1600,front,unreliable).reason)
+        assertEquals("target_ambiguous",select(BodyTargetLock(),1000,front,unreliable).reason)
+        val otherFace=duplicate.toMutableList().apply { this[2]=this[2].copy(x=.62f) }
+        assertEquals("target_ambiguous",select(acquired(),1600,front,otherFace).reason)
     }
     @Test fun equallyCentralPeopleAndSidewaysStartsDoNotAcquire() {
         val pair=BodyTargetLock();val side=BodyTargetLock()

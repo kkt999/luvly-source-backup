@@ -73,11 +73,13 @@ const accountTermsSections = <(String, String)>[
   (
     '8. Support and optional AI assistance',
     'Support messages and replies are stored in Firestore for you and authorised team members to handle the conversation. '
+        'Assistant chats are saved to your Luvly account in Firestore and are available through your conversation history. Staff cannot browse your assistant history. '
+        'You can permanently remove a chat and its messages from that history. Deleting a chat does not recall content already sent to Gemini or voluntarily shared in a support ticket. '
         'If you opt into the Gemini assistant, Google receives your question, up to four recent questions from that conversation and the help guide; '
         'the assistant does not receive your account records or have authority to change bookings, payments or stock. '
         'Provider handling depends on the applicable Google service terms; unpaid Gemini services may use content to improve products and may involve human review. '
         'Avoid personal or confidential information. You can use the help guide without sending a question to AI, switch AI off, or contact the team directly. '
-        'A conversation transcript is shared with the team only when you choose that action. AI answers can be wrong.',
+        'An assistant excerpt is shared with the team only after you review and send a support ticket. AI answers can be wrong.',
   ),
   (
     '9. Google Calendar and notifications',
@@ -192,11 +194,13 @@ const accountTermsSectionsMalay = <(String, String)>[
   (
     '8. Sokongan dan bantuan AI pilihan',
     'Mesej sokongan dan balasan disimpan di Firestore untuk anda serta pasukan yang diberi kuasa mengendalikan perbualan. '
+        'Perbualan pembantu disimpan dalam akaun Luvly anda di Firestore dan boleh dibuka melalui sejarah perbualan. Staf tidak boleh melihat sejarah pembantu anda. '
+        'Anda boleh memadamkan perbualan dan mesejnya daripada sejarah tersebut. Pemadaman tidak menarik balik kandungan yang telah dihantar ke Gemini atau dikongsi melalui tiket sokongan. '
         'Jika anda memilih pembantu Gemini, Google menerima soalan anda, sehingga empat soalan terkini daripada perbualan itu dan panduan bantuan; '
         'pembantu tidak menerima rekod akaun atau mempunyai kuasa mengubah tempahan, bayaran atau stok. '
         'Pengendalian oleh penyedia bergantung pada terma perkhidmatan Google yang berkenaan; perkhidmatan Gemini tanpa bayaran mungkin menggunakan kandungan untuk menambah baik produk dan melibatkan semakan manusia. '
         'Elakkan maklumat peribadi atau sulit. Anda boleh menggunakan panduan tanpa menghantar soalan kepada AI, mematikan AI atau menghubungi staf secara langsung. '
-        'Transkrip perbualan dikongsi dengan staf hanya apabila anda memilih tindakan itu. Jawapan AI boleh tersilap.',
+        'Petikan perbualan pembantu hanya dikongsi dengan staf selepas anda menyemak dan menghantar tiket sokongan. Jawapan AI boleh tersilap.',
   ),
   (
     '9. Google Calendar dan pemberitahuan',

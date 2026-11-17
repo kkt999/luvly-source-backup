@@ -5,6 +5,7 @@ import 'package_api.dart';
 import 'package_screen.dart' show PackageChoiceScreen;
 import 'fitting_assessment.dart';
 import 'fitting_gown_change.dart';
+import 'fitting_makeup_fields.dart';
 
 const fittingDecisionLabels = {
   'QuoteNeeded': 'Chosen gown · prepare proposal',
@@ -441,6 +442,9 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
   final note = TextEditingController();
   final lines = <_QuoteLine>[];
   final serviceTiming = <PackageServiceItem, TextEditingController>{};
+  final makeup = <FittingMakeupDraft>[];
+  String? get wedding =>
+      widget.selection.data['rentalPlan']?['eventDate'] as String?;
 
   late final missingAccessories =
       widget.selection.data['selectionFlowVersion'] == 1
@@ -457,6 +461,27 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
   late final requestId = packageRequestId();
   bool busy = false, frozen = false;
   String? error;
+
+  Future<dynamic> loadMakeupOptions() async {
+    try {
+      return await widget.api.transport.businessRequest(
+        '/v1/package-selections/${widget.selection.id}/fitting-makeup-options',
+      );
+    } on PaymentFailure catch (failure) {
+      // The older server can still accept the existing timing fields during rollout.
+      if (failure.code != 'NOT_FOUND' || !mounted) rethrow;
+      setState(() {
+        for (final draft in makeup) {
+          serviceTiming[draft.service] = TextEditingController(
+            text: draft.savedTiming,
+          );
+        }
+        makeup.clear();
+      });
+      return {'artists': [], 'trials': []};
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -466,11 +491,15 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
     for (final service in widget.selection.services.where(
       (s) => s.requiresTeamScheduling,
     )) {
+      final previous =
+          saved.where((row) => row['serviceId'] == service.id).firstOrNull
+              as Map?;
+      if (FittingMakeupDraft.handles(service)) {
+        makeup.add(FittingMakeupDraft(service, previous));
+        continue;
+      }
       serviceTiming[service] = TextEditingController(
-        text: saved
-            .where((row) => row['serviceId'] == service.id)
-            .map((row) => row['timing'] as String)
-            .firstOrNull,
+        text: previous?['timing'] as String?,
       );
     }
     final a = widget.selection.data['fittingDecision']?['assessment'];
@@ -507,6 +536,16 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
 
   Future<void> save() async {
     if (missingAccessories.isNotEmpty) return;
+    final makeupConfirmations = makeup
+        .map((draft) => draft.confirmation(wedding))
+        .toList();
+    if (makeupConfirmations.contains(null)) {
+      setState(
+        () => error =
+            'Choose the time and makeup artist for each selected makeup service.',
+      );
+      return;
+    }
     if (serviceTiming.values.any(
       (controller) => controller.text.trim().length < 8,
     )) {
@@ -549,8 +588,9 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
           'decisionRevision':
               widget.selection.data['fittingDecisionRevision'] ?? 0,
           'note': note.text.trim(),
-          if (serviceTiming.isNotEmpty)
+          if (makeup.isNotEmpty || serviceTiming.isNotEmpty)
             'serviceConfirmations': [
+              ...makeupConfirmations.nonNulls,
               for (final entry in serviceTiming.entries)
                 {'serviceId': entry.key.id, 'timing': entry.value.text.trim()},
             ],
@@ -652,6 +692,13 @@ class _FittingQuoteEditorState extends State<FittingQuoteEditor> {
               ),
               const SizedBox(height: 16),
             ],
+            if (makeup.isNotEmpty)
+              FittingMakeupFields(
+                load: loadMakeupOptions,
+                drafts: makeup,
+                wedding: wedding,
+                enabled: !frozen,
+              ),
             if (serviceTiming.isNotEmpty) ...[
               Text(
                 'Service arrangements',

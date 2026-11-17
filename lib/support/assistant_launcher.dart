@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../src/design.dart' show CustomerUi;
 import 'assistant_api.dart';
+import 'assistant_history_api.dart';
+import 'assistant_strings.dart';
 import 'assistant_screen.dart';
 
 /// Tracks the root navigator, including dialogs/sheets, without covering them.
@@ -58,12 +60,16 @@ class _AssistantScope extends InheritedWidget {
     required this.visibility,
     required this.onOpen,
     required super.child,
+    this.session,
   });
   final AssistantVisibility visibility;
   final VoidCallback? onOpen;
+  final AssistantSession? session;
   @override
   bool updateShouldNotify(_AssistantScope oldWidget) =>
-      visibility != oldWidget.visibility || onOpen != oldWidget.onOpen;
+      visibility != oldWidget.visibility ||
+      onOpen != oldWidget.onOpen ||
+      session != oldWidget.session;
 }
 
 /// Moves the launcher into a screen's toolbar while that route is active.
@@ -77,7 +83,10 @@ class AssistantAppBarAction extends StatelessWidget {
     return AssistantExclusion(
       enabled: ModalRoute.isCurrentOf(context) ?? true,
       child: IconButton(
-        tooltip: 'Open Luvly assistant',
+        tooltip: AssistantStrings.of(
+          context,
+          'auto',
+        )[AssistantText.openAssistant],
         icon: const Icon(Icons.smart_toy_outlined),
         color: Theme.of(context).colorScheme.primary,
         onPressed: scope!.onOpen,
@@ -139,23 +148,31 @@ Future<void> openLuvlyAssistant(
   BuildContext context, {
   AssistantApi? api,
   Future<void> Function(String draft)? onContact,
-}) => showModalBottomSheet<void>(
-  context: context,
-  isScrollControlled: true,
-  useSafeArea: true,
-  backgroundColor: CustomerUi.canvas,
-  clipBehavior: Clip.antiAlias,
-  shape: const RoundedRectangleBorder(borderRadius: CustomerUi.sheetRadius),
-  sheetAnimationStyle: CustomerUi.expansionMotion(context),
-  builder: (sheetContext) => FractionallySizedBox(
-    heightFactor: .94,
-    child: SupportAssistantScreen(
-      api: api,
-      onContact: onContact,
-      onClose: () => Navigator.pop(sheetContext),
+  AssistantSession? session,
+}) {
+  final chatSession =
+      session ??
+      context.getInheritedWidgetOfExactType<_AssistantScope>()?.session;
+  return showModalBottomSheet<void>(
+    context: context,
+    barrierLabel: AssistantStrings.of(context, 'auto')[AssistantText.dismiss],
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: CustomerUi.canvas,
+    clipBehavior: Clip.antiAlias,
+    shape: const RoundedRectangleBorder(borderRadius: CustomerUi.sheetRadius),
+    sheetAnimationStyle: CustomerUi.expansionMotion(context),
+    builder: (sheetContext) => FractionallySizedBox(
+      heightFactor: .94,
+      child: SupportAssistantScreen(
+        api: api,
+        session: chatSession,
+        onContact: onContact,
+        onClose: () => Navigator.pop(sheetContext),
+      ),
     ),
-  ),
-);
+  );
+}
 
 class AssistantHost extends StatefulWidget {
   const AssistantHost({
@@ -166,12 +183,14 @@ class AssistantHost extends StatefulWidget {
     required this.enabled,
     this.onContact,
     this.api,
+    this.customerUid,
   });
   final Widget child;
   final GlobalKey<NavigatorState> navigatorKey;
   final AssistantRouteObserver observer;
   final bool enabled;
   final AssistantApi? api;
+  final String? customerUid;
   final Future<void> Function(String draft)? onContact;
   @override
   State<AssistantHost> createState() => _AssistantHostState();
@@ -179,9 +198,29 @@ class AssistantHost extends StatefulWidget {
 
 class _AssistantHostState extends State<AssistantHost> {
   final visibility = AssistantVisibility();
+  AssistantSession? session;
   bool opening = false;
   @override
+  void initState() {
+    super.initState();
+    configureSession();
+  }
+
+  @override
+  void didUpdateWidget(AssistantHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.customerUid != oldWidget.customerUid) configureSession();
+  }
+
+  void configureSession() {
+    session?.dispose();
+    final uid = widget.customerUid;
+    session = uid == null ? null : AssistantSession(AssistantHistoryApi(uid));
+  }
+
+  @override
   void dispose() {
+    session?.dispose();
     visibility.dispose();
     super.dispose();
   }
@@ -195,6 +234,7 @@ class _AssistantHostState extends State<AssistantHost> {
       await openLuvlyAssistant(
         context,
         api: widget.api,
+        session: session,
         onContact: widget.onContact,
       );
     } finally {
@@ -206,6 +246,7 @@ class _AssistantHostState extends State<AssistantHost> {
   Widget build(BuildContext context) => _AssistantScope(
     visibility: visibility,
     onOpen: widget.enabled ? open : null,
+    session: session,
     child: ListenableBuilder(
       listenable: Listenable.merge([widget.observer, visibility]),
       builder: (context, _) {
@@ -224,7 +265,10 @@ class _AssistantHostState extends State<AssistantHost> {
                 right: 18,
                 bottom: 112 + media.padding.bottom,
                 child: Semantics(
-                  label: 'Open Luvly assistant',
+                  label: AssistantStrings.of(
+                    context,
+                    'auto',
+                  )[AssistantText.openAssistant],
                   button: true,
                   child: Container(
                     decoration: BoxDecoration(

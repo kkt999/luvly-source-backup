@@ -23,4 +23,12 @@ class PreviewReadinessTest {
         r.observe(true,1600)
         assertTrue(r.ready(1950))
     }
+    @Test fun anExpiredDisplayBetweenSlowResultsDoesNotEraseConsecutiveCaptures() {
+        val r=PreviewReadiness()
+        r.observe(true,1000)
+        r.observe(true,1500)
+        assertFalse(r.ready(2300))
+        r.observe(true,2000)
+        assertTrue(r.ready(2450))
+    }
 }

@@ -31,6 +31,7 @@ class DressRenderer(context: Context, texture: TextureView, modelAsset: String,
     private var swap: SwapChain? = null
     private val light: Int
     private val ambient: IndirectLight
+    private var cameraBrightness=1f
     private val colorGrading: ColorGrading
     private var visible = false
     private var closed = false
@@ -71,6 +72,7 @@ class DressRenderer(context: Context, texture: TextureView, modelAsset: String,
             .irradiance(1,floatArrayOf(1f,1f,1f))
             .intensity(16000f).build(engine)
         scene.indirectLight=ambient
+        updateLighting(cameraBrightness)
         provider=UbershaderProvider(engine)
         loader=AssetLoader(engine,provider,EntityManager.get())
         resources=ResourceLoader(engine)
@@ -105,6 +107,7 @@ class DressRenderer(context: Context, texture: TextureView, modelAsset: String,
     companion object {
         /** File IO may run off-thread; all Engine / gltfio calls remain on the main thread. */
         fun readModel(context: Context,modelAsset: String): ByteBuffer {
+            if(modelAsset.startsWith("generated-"))return GeneratedDressFile.read(context,modelAsset)
             val assetPath=if(BuildConfig.DEBUG && modelAsset in listOf("local_review/elegant_bridal.glb","local_review/princess_2096.glb"))
                 modelAsset else "flutter_assets/$modelAsset"
             val bytes=context.assets.open(assetPath).use { it.readBytes() }
@@ -180,6 +183,7 @@ class DressRenderer(context: Context, texture: TextureView, modelAsset: String,
         scene.removeEntities(asset.entities)
         loader.destroyAsset(asset)
         asset=loading.asset;anchors=loading.anchors;visible=false
+        updateLighting(cameraBrightness)
         resources.evictResourceData()
         loading.completed(true)
     }
@@ -193,9 +197,10 @@ class DressRenderer(context: Context, texture: TextureView, modelAsset: String,
 
     fun updateLighting(brightness: Float) {
         if(closed || !brightness.isFinite())return
-        val bounded=brightness.coerceIn(.72f,1.12f)
-        engine.lightManager.setIntensity(engine.lightManager.getInstance(light),32000f*bounded)
-        ambient.intensity=16000f*bounded
+        cameraBrightness=brightness.coerceIn(.72f,1.12f)
+        val intensity=cameraBrightness*anchors.lightScale
+        engine.lightManager.setIntensity(engine.lightManager.getInstance(light),32000f*intensity)
+        ambient.intensity=16000f*intensity
     }
 
     fun update(pose: DressPose?, adjustment: Float, skirtDrape: Boolean=true) {

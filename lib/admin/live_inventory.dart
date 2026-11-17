@@ -4,10 +4,13 @@ import '../catalogue/dress_photo_data.dart';
 import '../catalogue/ar_models.dart';
 import '../catalogue/catalogue_repository.dart';
 import '../catalogue/catalogue_widgets.dart';
+import '../catalogue/dress_ar_api.dart';
 import '../catalogue/variant_stock_screen.dart';
+import '../payments/payment_api.dart';
 import 'design.dart';
 import 'model.dart';
 import 'inventory_workspace.dart';
+import 'dress_ar_dialog.dart';
 
 class LiveInventoryPage extends StatefulWidget {
   const LiveInventoryPage({super.key});
@@ -18,10 +21,13 @@ class LiveInventoryPage extends StatefulWidget {
 class _LiveInventoryPageState extends State<LiveInventoryPage> {
   final listState = InventoryListState();
   String? selectedId;
+  bool unpublishing = false;
+  bool deleting = false;
+  bool get changingDress => unpublishing || deleting;
 
   Future<void> edit(CatalogueDress? dress) async {
     final model = PortalScope.of(context);
-    if (!model.isManager) return;
+    if (!model.isManager || changingDress) return;
     final saved = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -41,6 +47,113 @@ class _LiveInventoryPageState extends State<LiveInventoryPage> {
   void stock(CatalogueDress dress) => Navigator.of(context).push(
     MaterialPageRoute<void>(builder: (_) => VariantStockScreen(dress: dress)),
   );
+
+  Future<void> unpublish(CatalogueDress dress) async {
+    final model = PortalScope.of(context);
+    if (!model.isManager || !dress.published || changingDress) return;
+    final repository = CatalogueScope.of(context);
+    final actorUid = model.current!.id;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Unpublish dress?'),
+        content: Text(
+          'Hide ${dress.name} from the customer catalogue. You can publish it again from Edit Dress.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('Unpublish'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true || changingDress) return;
+    setState(() => unpublishing = true);
+    var message = 'Dress unpublished.';
+    try {
+      await repository.save(
+        CatalogueDress.fromFields(dress.id, {
+          ...dress.toFields(),
+          'revision': dress.revision,
+          'published': false,
+        }),
+        actorUid: actorUid,
+      );
+    } catch (error) {
+      message = error is StateError
+          ? error.message
+          : 'Could not unpublish the dress. Check your connection and try again.';
+    }
+    if (!mounted) return;
+    setState(() => unpublishing = false);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> delete(CatalogueDress dress) async {
+    if (!PortalScope.of(context).isManager || changingDress) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Permanently delete dress?'),
+        content: Text(
+          'Delete ${dress.name} and its stock records? This action is permanent.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialog).colorScheme.error,
+              foregroundColor: Theme.of(dialog).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('Delete permanently'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true || changingDress) return;
+    setState(() => deleting = true);
+    final api = HttpPaymentApi();
+    var deleted = false;
+    var message = 'Dress deleted.';
+    try {
+      final result = await api.businessRequest(
+        '/v1/dresses/${Uri.encodeComponent(dress.id)}/delete',
+        body: {'revision': dress.revision},
+      );
+      deleted = result is Map && result['deleted'] == true;
+      if (!deleted) {
+        message = 'Could not confirm deletion. Refresh the inventory.';
+      }
+    } on PaymentFailure catch (error) {
+      message = error.code == 'NOT_FOUND'
+          ? 'Dress deletion needs the updated inventory service.'
+          : error.message;
+    } catch (_) {
+      message =
+          'Could not delete the dress. Check your connection and try again.';
+    } finally {
+      api.close();
+    }
+    if (!mounted) return;
+    setState(() {
+      deleting = false;
+      if (deleted && selectedId == dress.id) selectedId = null;
+    });
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -161,10 +274,33 @@ class _LiveInventoryPageState extends State<LiveInventoryPage> {
                               ),
                               if (manager)
                                 FilledButton(
-                                  onPressed: snapshot.fromCache
+                                  onPressed: snapshot.fromCache || changingDress
                                       ? null
                                       : () => edit(g),
                                   child: const Text('Edit Dress'),
+                                ),
+                              if (manager && g.published)
+                                OutlinedButton.icon(
+                                  onPressed: snapshot.fromCache || changingDress
+                                      ? null
+                                      : () => unpublish(g),
+                                  icon: const Icon(
+                                    Icons.visibility_off_outlined,
+                                  ),
+                                  label: const Text('Unpublish dress'),
+                                ),
+                              if (manager)
+                                TextButton.icon(
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: Theme.of(
+                                      context,
+                                    ).colorScheme.error,
+                                  ),
+                                  onPressed: snapshot.fromCache || changingDress
+                                      ? null
+                                      : () => delete(g),
+                                  icon: const Icon(Icons.delete_outline),
+                                  label: const Text('Delete dress'),
                                 ),
                             ],
                           ),
@@ -214,6 +350,7 @@ class _DressEditorState extends State<DressEditor> {
   bool confirmedHighPrice = false;
   String arModelId = '';
   bool confirmedArModel = false;
+  bool generateTryOn = false;
   late final String id;
   late String category, availability;
   late bool published;
@@ -287,12 +424,25 @@ class _DressEditorState extends State<DressEditor> {
     }
   }
 
-  Future<void> save() async {
+  Future<void> save({bool manageTryOn = false}) async {
     if (busy || !form.currentState!.validate()) return;
+    if (generateTryOn) {
+      final confirmed = await confirmDressArGeneration(
+        context,
+        credits: dressArEstimatedCredits,
+        saveFirst: true,
+      );
+      if (!mounted || !confirmed || busy) return;
+    }
     setState(() {
       busy = true;
       error = null;
     });
+    final photoRevision = selectedPhoto != null
+        ? (widget.dress?.revision ?? 0) + 1
+        : removePhoto
+        ? 0
+        : (widget.dress?.photoRevision ?? 0);
     try {
       await widget.repository.save(
         CatalogueDress(
@@ -307,11 +457,7 @@ class _DressEditorState extends State<DressEditor> {
           imageUrl: selectedPhoto != null || removePhoto
               ? ''
               : (widget.dress?.imageUrl ?? ''),
-          photoRevision: selectedPhoto != null
-              ? (widget.dress?.revision ?? 0) + 1
-              : removePhoto
-              ? 0
-              : (widget.dress?.photoRevision ?? 0),
+          photoRevision: photoRevision,
           availability: availability,
           published: published,
           revision: widget.dress?.revision ?? 0,
@@ -320,7 +466,6 @@ class _DressEditorState extends State<DressEditor> {
         actorUid: widget.actorUid,
         photo: selectedPhoto,
       );
-      if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -330,7 +475,21 @@ class _DressEditorState extends State<DressEditor> {
               : 'Could not save. Check your connection and manager access, then retry. Your entries are still here.';
         });
       }
+      return;
     }
+    if (!mounted) return;
+    if ((generateTryOn || manageTryOn) && photoRevision > 0) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => DressArDialog(
+          uid: widget.actorUid,
+          dressId: id,
+          photoRevision: photoRevision,
+          generateOnOpen: generateTryOn,
+        ),
+      );
+    }
+    if (mounted) Navigator.pop(context, true);
   }
 
   Widget field(
@@ -512,9 +671,14 @@ class _DressEditorState extends State<DressEditor> {
                 field('Description', description, 3000, lines: 4, min: 20),
                 FormField<bool>(
                   key: photoField,
-                  validator: (_) => published && !hasPhoto
-                      ? 'Add a photo before publishing'
-                      : null,
+                  validator: (_) {
+                    if (generateTryOn && selectedPhoto == null) {
+                      return 'Upload a photo to generate AR try-on';
+                    }
+                    return published && !hasPhoto
+                        ? 'Add a photo before publishing'
+                        : null;
+                  },
                   builder: (state) => Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -531,9 +695,7 @@ class _DressEditorState extends State<DressEditor> {
                           fit: BoxFit.contain,
                           semanticLabel: 'Selected dress photo preview',
                         ),
-                        const Text(
-                          'New photo · saved when you select Save Dress',
-                        ),
+                        const Text('New photo · saved with the dress'),
                       ] else if (hasPhoto)
                         CatalogueDressPhoto(
                           dress: widget.dress!,
@@ -604,93 +766,114 @@ class _DressEditorState extends State<DressEditor> {
                   ),
                 ),
                 gap(12),
-                DropdownButtonFormField<String>(
-                  initialValue: availability,
-                  decoration: const InputDecoration(labelText: 'Availability'),
-                  items: dressAvailability
-                      .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                      .toList(),
-                  onChanged: busy
-                      ? null
-                      : (v) => setState(() => availability = v!),
-                ),
-                gap(12),
-                DropdownButtonFormField<String>(
-                  initialValue: resolveCatalogueArDress(arModelId) == null
-                      ? ''
-                      : arModelId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'AR model (optional)',
-                  ),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '',
-                      child: Text('No AR model'),
+                if (widget.dress == null)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('AR try-on'),
+                    subtitle: Text(
+                      generateTryOn
+                          ? 'Tripo generates a 3D model from the dress photo. About $dressArEstimatedCredits API credits.'
+                          : 'Add a 3D try-on for this dress.',
                     ),
-                    for (final model in catalogueArModels)
-                      DropdownMenuItem(
-                        value: model.id!,
-                        child: Text(
-                          model.name,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: busy
-                      ? null
-                      : (value) => setState(() {
-                          arModelId = value ?? '';
-                          confirmedArModel = false;
-                        }),
-                ),
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Optional. A photo does not create a 3D model. Only link a model that represents this dress. Elegant is available for AR only in the Android debug build.',
-                  ),
-                ),
-                if (resolveCatalogueArDress(arModelId) != null) ...[
-                  gap(12),
-                  Image.asset(
-                    'assets/images/${resolveCatalogueArDress(arModelId)!.asset}.jpg',
-                    height: 140,
-                    width: double.infinity,
-                    fit: BoxFit.contain,
-                    semanticLabel: 'Selected AR model render',
-                  ),
-                  FormField<bool>(
-                    validator: (_) => confirmedArModel
+                    value: generateTryOn,
+                    onChanged: busy
                         ? null
-                        : 'Check that the selected model represents this dress',
-                    builder: (state) => Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          value: confirmedArModel,
-                          title: const Text(
-                            'I checked this model against the dress and photo.',
+                        : (value) {
+                            setState(() => generateTryOn = value);
+                            if (!value) photoField.currentState?.validate();
+                          },
+                  )
+                else ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: availability,
+                    decoration: const InputDecoration(
+                      labelText: 'Availability',
+                    ),
+                    items: dressAvailability
+                        .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+                        .toList(),
+                    onChanged: busy
+                        ? null
+                        : (v) => setState(() => availability = v!),
+                  ),
+                  gap(12),
+                  DropdownButtonFormField<String>(
+                    initialValue: resolveCatalogueArDress(arModelId) == null
+                        ? ''
+                        : arModelId,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'AR model (optional)',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('No AR model'),
+                      ),
+                      for (final model in catalogueArModels)
+                        DropdownMenuItem(
+                          value: model.id!,
+                          child: Text(
+                            model.name,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          onChanged: busy
-                              ? null
-                              : (value) {
-                                  setState(
-                                    () => confirmedArModel = value ?? false,
-                                  );
-                                  state.validate();
-                                },
                         ),
-                        if (state.hasError)
-                          Text(
-                            state.errorText!,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
-                          ),
-                      ],
+                    ],
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() {
+                            arModelId = value ?? '';
+                            confirmedArModel = false;
+                          }),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Link an existing model or save an uploaded photo to generate one with Tripo.',
                     ),
                   ),
+                  if (resolveCatalogueArDress(arModelId) != null) ...[
+                    gap(12),
+                    Image.asset(
+                      'assets/images/${resolveCatalogueArDress(arModelId)!.asset}.jpg',
+                      height: 140,
+                      width: double.infinity,
+                      fit: BoxFit.contain,
+                      semanticLabel: 'Selected AR model render',
+                    ),
+                    FormField<bool>(
+                      validator: (_) => confirmedArModel
+                          ? null
+                          : 'Check that the selected model represents this dress',
+                      builder: (state) => Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          CheckboxListTile(
+                            contentPadding: EdgeInsets.zero,
+                            value: confirmedArModel,
+                            title: const Text(
+                              'I checked this model against the dress and photo.',
+                            ),
+                            onChanged: busy
+                                ? null
+                                : (value) {
+                                    setState(
+                                      () => confirmedArModel = value ?? false,
+                                    );
+                                    state.validate();
+                                  },
+                          ),
+                          if (state.hasError)
+                            Text(
+                              state.errorText!,
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.error,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
                 gap(12),
                 SwitchListTile(
@@ -730,13 +913,23 @@ class _DressEditorState extends State<DressEditor> {
           onPressed: busy ? null : () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
+        if (widget.dress != null &&
+            arModelId.isEmpty &&
+            (selectedPhoto != null ||
+                (!removePhoto && (widget.dress?.photoRevision ?? 0) > 0)))
+          OutlinedButton(
+            onPressed: busy ? null : () => save(manageTryOn: true),
+            child: const Text('Save & manage 3D try-on'),
+          ),
         FilledButton(
-          onPressed: busy ? null : save,
+          onPressed: busy ? null : () => save(),
           child: Text(
             preparingPhoto
                 ? 'Preparing photo…'
                 : busy
                 ? 'Saving…'
+                : generateTryOn
+                ? 'Save & generate AR'
                 : 'Save Dress',
           ),
         ),

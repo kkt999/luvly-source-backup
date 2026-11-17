@@ -7,7 +7,8 @@ import {fittingFitsRental,hasFittingWaiver} from './booking_dates.mjs';
 import {packagePaymentQuote} from './bridal_payment_policy.mjs';
 import {preparePromotion} from './promotions.mjs';
 import {extensionHolds,prepareExtensionClose} from './rental_extensions.mjs';
-import {agreedFittingTotal} from './fitting_proposals.mjs';
+import {agreedFittingTotal,fittingPresentation} from './fitting_proposals.mjs';
+import {checkMakeupTrialReferences} from './fitting_makeup.mjs';
 import {selectedAvailability,requireSelectedAvailability} from './rental_availability.mjs';
 import {addsRentalDay} from './package_service_types.mjs';
 const id = v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,150}$/.test(v);
@@ -202,6 +203,7 @@ export class PackageRentals {
       if(previous) {check(previous.fingerprint===fingerprint,'REQUEST_CONFLICT');return previous;}
       check(s && s.rentalPlan && s.rentalPlanRevision===input.planRevision,'RENTAL_PLAN_CHANGED');
       const agreedTotal=agreedFittingTotal(s);
+      await checkMakeupTrialReferences(tx,s);
       check(s.selectedGowns.length+s.selectedAccessories.length>0,'PACKAGE_RENTAL_ITEMS_REQUIRED');
       check(input.depositCents<=agreedTotal && (agreedTotal-input.depositCents===0 || agreedTotal-input.depositCents>=100),'INVALID_AMOUNT');
       const waived=s.fittingChoice?.mode==='SkipFitting'&&s.fittingChoice.accepted===true&&s.fittingDecision?.mode==='Waived'&&s.fittingDecision.state==='Approved';
@@ -233,10 +235,12 @@ export class PackageRentals {
       const now=this.now(),dates=packageDates(s,s.rentalPlan,now);
       const resources=await this.checkResources(tx,s,dates,now,{strict:true});
       const commitPromotion=await preparePromotion(tx,s,rentalId,now+HOLD_MS,now);
+      const fittingQuote=s.fittingQuote?.servicePlan?.some(row=>row.schedule)
+        ? fittingPresentation(s).fittingQuote : s.fittingQuote;
       const rental={id:rentalId,uid:s.uid,appointmentId:input.appointmentId,invoiceId,packageSelectionId:selectionId,fingerprint,
         ...(waived?{fittingWaiver:{state:'Approved',uid:s.uid,acceptedAt:s.fittingChoice.acceptedAt,approvedAt:s.fittingDecision.recordedAt,approvedBy:s.fittingDecision.by}}:{}),
         gowns:s.selectedGowns,accessories:s.selectedAccessories,...s.rentalPlan,...dates,depositCents:input.depositCents,totalCents:agreedTotal,
-        ...(s.fittingWorkflowVersion===2?{fittingQuote:s.fittingQuote,packageBaseCents:s.totalCents,fittingAdjustmentsRequired:s.fittingDecision.adjustment!=='None'}:{}),
+        ...(s.fittingWorkflowVersion===2?{fittingQuote,packageBaseCents:s.totalCents,fittingAdjustmentsRequired:s.fittingDecision.adjustment!=='None'}:{}),
         ...(s.promotion?{promotion:s.promotion}:{}),
         balanceCents:agreedTotal-input.depositCents,...policy,fittingCreditId:creditId,state:'Held',paymentState:'AwaitingDeposit',createdBy:uid,createdAt:now,expiresAt:now+HOLD_MS};
       commitPromotion();

@@ -57,7 +57,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('RM 2500.00'), findsOneWidget);
+      expect(find.text('RM 2,500.00'), findsOneWidget);
       expect(find.text('Dress rental'), findsOneWidget);
       expect(find.textContaining('priced separately'), findsOneWidget);
       expect(tester.takeException(), isNull);

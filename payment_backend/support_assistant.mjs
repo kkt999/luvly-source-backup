@@ -16,7 +16,17 @@ const copy={
  zh:{welcome:'我可以说明试穿、套餐付款、租期、配饰、尺码指南、日历和收据。关于你自己的订单、付款或退款，请联系 Luvly 人工客服。',privacy:'请勿发送密码、验证码、API 密钥或银行／银行卡资料。这条消息没有发送给 AI。涉及账户的具体问题，请通过人工客服工单处理。'},
  ms:{welcome:'Saya boleh menerangkan sesi mencuba, bayaran pakej, tarikh sewaan, aksesori, panduan saiz, Calendar dan resit. Untuk pesanan, bayaran atau bayaran balik peribadi, sila hubungi staf Luvly.',privacy:'Jangan hantar kata laluan, kod pengesahan, kunci API atau butiran bank/kad. Mesej ini tidak dihantar kepada AI. Gunakan tiket sokongan untuk urusan akaun peribadi.'},
 };
-export function assistantLanguage(value,message){return languages.includes(value)?value:/[\u3400-\u9fff]/u.test(message)?'zh':/\b(saya|boleh|berapa|gaun|sewa|bayar|janji|saiz|stok|batal)\b/i.test(message)?'ms':'en';}
+function messageLanguage(message){
+ const text=message.trim().replace(/\[(?:email|number|link) removed\]/gi,'').trim();
+ if(/[\u3400-\u9fff]/u.test(text))return 'zh';
+ if(/\b(saya|awak|anda|boleh|berapa(?:kah)?|bagaimana(?:kah)?|bila(?:kah)?|gaun|sewaan?|menyewa|bayaran?|membayar|janji temu|saiz|stok|batal(?:kan)?|tempah(?:an)?|menempah|cuba|mencuba|kahwin|terima kasih|selamat pagi|nak|patut)\b/i.test(text))return 'ms';
+ const words=text.replace(/[^A-Za-z]+/g,' ').trim().toLowerCase();
+ return words && !/^(?:(?:ok(?:ay)?|hmm|oh|ah|rm|myr|yes|no|sure)\s*)+$/.test(words)?'en':null;
+}
+export function assistantLanguage(value,message,history=[]){
+ if(languages.includes(value))return value;
+ return messageLanguage(message) ?? history.slice(-4).reverse().map(messageLanguage).find(Boolean) ?? 'en';
+}
 export function guideMatch(message,history=[]){
  let q=message.toLowerCase();
  const score=q=>helpGuide.articles.map(a=>({id:a.id,n:a.keywords.filter(k=>/[a-z]/i.test(k)?new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}${k.length<4?'\\b':''}`,'i').test(q):q.includes(k.toLowerCase())).length})).filter(r=>r.n>0).sort((a,b)=>b.n-a.n).slice(0,2).map(r=>r.id);
@@ -93,20 +103,30 @@ export class SupportAssistant{
  constructor({store,access,config=()=>null,gateway=c=>new DialogflowHelpRouter(c),now=Date.now,provider='Dialogflow ES',consentVersion=2}){Object.assign(this,{store,access,config,gateway,now,provider,consentVersion});this.inFlight=0;this.replies=new Map();}
  async status(uid){await this.access(uid);return {aiConfigured:!!this.config(),guideVersion:helpGuide.version,provider:this.provider,consentVersion:this.consentVersion};}
  response(result,language){
+  language=result.language??language;
   const articles=result.articleIds.map(id=>helpGuide.articles.find(a=>a.id===id));
   return {mode:result.mode,notice:result.notice ?? null,language,guideVersion:helpGuide.version,handoff:result.handoff,
    answer:result.notice==='Privacy'?copy[language].privacy:result.answer??(articles.length?articles.map(a=>a.answer[language]).join('\n\n'):copy[language].welcome),
    sources:articles.map(a=>({id:a.id,title:a.title[language],excerpt:a.answer[language]}))};
  }
- async ask(uid,input){
+ safeInput(message){
+  const key=this.config()?.apiKey;
+  return key && message.includes(key) ? null : safeQuestion(message);
+ }
+ privacy(preference,message){
+  return this.response({articleIds:[],mode:'Guide',handoff:true,notice:'Privacy'},assistantLanguage(preference,message));
+ }
+ async ask(uid,input,{conversationId}={}){
   await this.access(uid);
   check(input && Object.keys(input).every(k=>['message','history','language','mode','requestId','consentVersion'].includes(k)) &&
    typeof input.message==='string' && input.message.trim().length>0 && input.message.length<=800 && !/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(input.message) &&
    Array.isArray(input.history) && input.history.length<=4 && input.history.every(q=>typeof q==='string' && q.length<=800) &&
    ['auto',...languages].includes(input.language) && ['Guide','AI'].includes(input.mode) && typeof input.requestId==='string' && /^[a-f0-9]{32}$/.test(input.requestId),'INVALID_ASSISTANT_MESSAGE');
-  const language=assistantLanguage(input.language,input.message),base={...guideMatch(input.message,input.history),mode:'Guide'};
-  const fallback=notice=>this.response({...base,notice},language);
   const question=safeQuestion(input.message),history=input.history.map(safeQuestion);
+  const safeContext=history.filter(q=>q!==null && !needsPersonalSupport(q));
+  const language=assistantLanguage(input.language,question??input.message,safeContext);
+  const base={...guideMatch(input.message,input.history),mode:'Guide'};
+  const fallback=notice=>this.response({...base,notice},language);
   if(question===null || history.some(q=>q===null))return this.response({articleIds:[],mode:'Guide',handoff:true,notice:'Privacy'},language);
   if(input.mode==='Guide')return fallback(null);
   check(input.consentVersion===this.consentVersion,'AI_CONSENT_REQUIRED');
@@ -120,32 +140,41 @@ export class SupportAssistant{
   const fingerprint=hash(JSON.stringify([question,history,language])),day=new Date(this.now()).toISOString().slice(0,10),requestPath=`assistantRequests/${hash(namespace+uid+':'+input.requestId)}`;
   let intent;
   try{intent=await this.store.atomic(async tx=>{
-   const prior=await tx.get(requestPath);
+   // The conversation service already owns a transactional, per-turn lease.
+   // Only the legacy stateless endpoint needs this separate request ledger.
+   const prior=conversationId?null:await tx.get(requestPath);
    if(prior){check(prior.fingerprint===fingerprint,'ASSISTANT_REQUEST_CONFLICT',409);return prior.result ? {cached:prior.result} : {notice:'Busy'};}
    const usagePrefix=config.provider==='Gemini'?'gemini-':'';
    const globalPath=`assistantUsage/${usagePrefix}global-${day}`,userPath=`assistantUsage/${usagePrefix}${hash(uid).slice(0,32)}-${day}`;
    const global=await tx.get(globalPath),user=await tx.get(userPath);
    if((global?.count??0)>=config.dailyRequestLimit || (user?.count??0)>=config.perUserDailyLimit)return {notice:'Quota'};
    tx.set(globalPath,{count:(global?.count??0)+1});tx.set(userPath,{count:(user?.count??0)+1});
-   tx.set(requestPath,{fingerprint,state:'Calling',createdAt:this.now(),expiresAt:new Date(this.now()+30*86400000)});return {call:true};
+   if(!conversationId)tx.set(requestPath,{fingerprint,state:'Calling',createdAt:this.now(),expiresAt:new Date(this.now()+30*86400000)});
+   return {call:true};
   });}catch(e){this.inFlight--;if(e instanceof HttpError)throw e;return fallback('Unavailable');}
   if(intent.cached){this.inFlight--;const cached=this.replies.get(requestPath);return this.response(cached?.until>this.now() && cached.fingerprint===fingerprint?cached.result:intent.cached,language);}
   if(intent.notice){this.inFlight--;return fallback(intent.notice);}
   let result;
-  try{const routed=await this.gateway(config).route(question,config.provider==='Gemini'?history.filter(q=>!needsPersonalSupport(q)):[],language,hash(uid+':'+input.requestId).slice(0,32));
+  try{
+   const gemini=config.provider==='Gemini';
+   const autoLanguage=gemini && input.language==='auto';
+   const routed=await this.gateway(config).route(question,gemini?safeContext:[],language,hash(uid+':'+(conversationId??input.requestId)).slice(0,32),{autoLanguage});
    check(routed && Array.isArray(routed.articleIds) && routed.articleIds.length<=3 && routed.articleIds.every(id=>ids.has(id)) && typeof routed.handoff==='boolean' && (routed.answer===undefined || typeof routed.answer==='string' && routed.answer.length<=2400),'AI_INVALID_REPLY');
    result={articleIds:routed.articleIds,handoff:routed.handoff || (config.provider==='Gemini'?false:base.handoff),mode:'AI',...(routed.answer?{answer:routed.answer}:{})};
+   if(autoLanguage && languages.includes(routed.language))result.language=routed.language;
    if(config.provider==='Gemini' && !routed.answer)result={...result,mode:'Guide',notice:'OutsideScope'};
   }
   catch(error){result={...base,mode:'Guide',notice:error.message==='AI_QUOTA'?'Quota':'Unavailable'};}
   finally{this.inFlight--;}
+  if(conversationId)return this.response(result,language);
   // Generated text is memory-only for 10 minutes. Persist policy IDs, not chat text.
   for(const [key,cached] of this.replies)if(cached.until<=this.now())this.replies.delete(key);
   if(this.replies.size>=100)this.replies.delete(this.replies.keys().next().value);
   const cachedReply={fingerprint,result,until:this.now()+600000};
   this.replies.set(requestPath,cachedReply);
   const cleanup=setTimeout(()=>{if(this.replies.get(requestPath)===cachedReply)this.replies.delete(requestPath);},600000);cleanup.unref?.();
-  const durable=result.answer?{articleIds:result.articleIds,handoff:result.handoff,mode:'Guide',notice:'AlreadyAnswered'}:result;
+  const durable=result.answer?{articleIds:result.articleIds,handoff:result.handoff,mode:'Guide',notice:'AlreadyAnswered',
+   ...(result.language?{language:result.language}:{})}:result;
   try{await this.store.atomic(async tx=>{const prior=await tx.get(requestPath);if(prior?.state==='Calling')tx.set(requestPath,{...prior,state:'Complete',result:durable});});}catch{/* No automatic provider retry after ambiguous completion. */}
   return this.response(result,language);
  }

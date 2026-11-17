@@ -9,16 +9,19 @@ const _channel = MethodChannel('luvly/ar');
 
 class SavedLook {
   final String id, dressId, path;
+  final String? dressName;
   final DateTime savedAt;
   final bool fullBody;
   SavedLook.fromMap(Map m)
     : id = m['id'] as String,
       dressId = m['dressId'] as String,
+      dressName = m['dressName'] as String?,
       path = m['path'] as String,
       savedAt = DateTime.fromMillisecondsSinceEpoch(m['savedAt'] as int),
       fullBody = m['fullBody'] == true;
   int get dressIndex => dresses.indexWhere((d) => d.id == dressId);
-  String get name => dressIndex < 0 ? 'Saved dress' : dresses[dressIndex].name;
+  String get name =>
+      dressIndex < 0 ? dressName ?? 'Saved dress' : dresses[dressIndex].name;
 }
 
 Widget savedLookImage(SavedLook look, {double? height}) => Image.file(

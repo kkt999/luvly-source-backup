@@ -7,11 +7,13 @@ import android.content.Intent
 import com.luvly.luvly_app.ar.TryOnActivity
 import com.luvly.luvly_app.ar.GownViewerActivity
 import com.luvly.luvly_app.ar.GownViewerModels
+import com.luvly.luvly_app.ar.GeneratedDressFile
 import com.luvly.luvly_app.ar.ArDressCatalogue
 import com.luvly.luvly_app.ar.LookStore
 import com.luvly.luvly_app.ar.AccountLookDirectory
 import com.luvly.luvly_app.makeup.BridalMakeupActivity
 import com.google.firebase.auth.FirebaseAuth
+import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
     private var receiptSaver: ReceiptSaver? = null
@@ -69,6 +71,32 @@ class MainActivity : FlutterActivity() {
                 if(call.method=="deleteLook") {
                     try { result.success(store.delete(call.argument<String>("id") ?: "")) }
                     catch(_:Exception) { result.error("LOOK_DELETE","Could not delete this look",null) }
+                    return@setMethodCallHandler
+                }
+                if(call.method=="openGeneratedTryOn") {
+                    val id=call.argument<String>("dressId")
+                    val label=call.argument<String>("label")
+                    val bytes=call.argument<ByteArray>("model")
+                    thread(name="luvly-generated-gown") {
+                        val staged=runCatching { GeneratedDressFile.stage(this,id,label,bytes) }
+                        runOnUiThread {
+                            val intent=staged.getOrNull()
+                            if(intent==null) {
+                                result.error("AR_UNAVAILABLE","Could not open this 3D model",null)
+                            } else if(isDestroyed || isFinishing || FirebaseAuth.getInstance().currentUser?.uid!=uid) {
+                                GeneratedDressFile.remove(this,intent.getStringExtra("generatedModel")!!)
+                                result.error("AR_UNAVAILABLE","Try-on session changed",null)
+                            } else {
+                                try {
+                                    startActivity(intent)
+                                    result.success(null)
+                                } catch (_: Exception) {
+                                    GeneratedDressFile.remove(this,intent.getStringExtra("generatedModel")!!)
+                                    result.error("AR_START","Unable to open live try-on",null)
+                                }
+                            }
+                        }
+                    }
                     return@setMethodCallHandler
                 }
                 if (call.method == "openTryOn" || call.method == "openGownViewer") {

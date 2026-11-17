@@ -6,6 +6,7 @@ import { PaymentService } from './payment_service.mjs';
 import { createHandler } from './http_app.mjs';
 import {variantId,rentalDates} from './rental_service.mjs';
 import {packagePaymentQuote} from './bridal_payment_policy.mjs';
+import {accessoryCatalogue,priceAccessories} from './accessory_catalogue.mjs';
 
 const initialPackage = () => ({ id: 'essential', revision: 0, name: 'Essential Bridal', description: 'Dress rental and a personal bridal consultation.', basePriceCents: 250000, active: true,
   services: [
@@ -54,6 +55,94 @@ async function gownFixture(count = 1) {
 }
 const now = Date.UTC(2026, 9, 10, 0);
 const availabilityPlan={pickupDate:'2026-10-16',eventDate:'2026-10-17',returnDate:'2026-10-18'};
+test('all three approved prices preview read-only with catalogue veil upgrades',async()=>{
+  const {store,service}=await fixture();
+  const rows=[
+    ['bridal-essentials',89900,82900,74900,1],
+    ['signature-bridal',179900,172900,164900,1],
+    ['luxe-bridal',299900,287900,279900,2],
+  ];
+  for(const [id,old,base,withoutVeil,count] of rows){
+    const original={...initialPackage(),id,revision:7,basePriceCents:old,includedGownCount:count,
+      allCatalogueGowns:true,eligibleDressIds:[],
+      services:[initialPackage().services[0],initialPackage().services[2],
+        {id:'veil-accessories',name:'Veil and accessory rental',description:'',kind:'Optional',priceCents:15000}]};
+    if(id==='bridal-essentials')original.services[2].id='veil-rental';
+    store.data.set(`servicePackages/${id}`,original);
+    await assert.rejects(service.approvedPricing('bride',id),fail('MANAGER_REQUIRED'));
+    const p=await service.approvedPricing('manager',id);
+    validatePackage(p);
+    assert.equal(p.revision,7);
+    assert.equal(p.includedGownCount,count);
+    assert.deepEqual(p.services[1],original.services[1]);
+    assert.deepEqual(await store.get(`servicePackages/${id}`),original);
+    const v=accessoryCatalogue.version;
+    const total=(removed,addons,items)=>{
+      const pricing=priceSelection(p,removed,addons);
+      return pricing.totalCents+priceAccessories(pricing.services,items,v).accessoryExtraCents;
+    };
+    const veil=itemId=>({serviceId:'veil-rental',itemId});
+    const standard=accessoryCatalogue.items.find(item=>item.id==='veil-short').priceCents;
+    const upgraded=accessoryCatalogue.items.find(item=>item.id==='veil-long').priceCents;
+    assert.equal(total([],[],[veil('veil-short')]),base);
+    assert.equal(total(['veil-rental'],[],[]),withoutVeil);
+    assert.equal(total([],[],[veil('veil-long')]),base+upgraded-standard);
+    assert.equal(total([],['accessory-rental'],[veil('veil-short'),
+      {serviceId:'accessory-rental',itemId:'ring-solitaire'},
+      {serviceId:'accessory-rental',itemId:'hair-comb'}]),base+5000);
+    assert.throws(()=>total([],[],[veil('ring-halo')]),fail('INVALID_ACCESSORY_SELECTION'));
+    assert.throws(()=>total(['veil-rental'],['accessory-rental'],[]),fail('PACKAGE_ACCESSORY_SELECTION_REQUIRED'));
+    assert.throws(()=>total(['veil-rental'],[],[veil('veil-long')]),fail('INVALID_ACCESSORY_SELECTION'));
+  }
+  await assert.rejects(service.approvedPricing('manager','essential'),fail('APPROVED_PACKAGE_PRICING_UNAVAILABLE'));
+});
+test('approved item pricing charges actual choices and preserves existing allowance records',async()=>{
+  const f=await gownFixture(2);
+  f.store.data.set(`rentalVariants/${variantId('gown2','S')}`,{quantity:1,allocations:{}});
+  const old=await f.service.select('bride',f.input);
+  const config={...initialPackage(),revision:2,includedGownCount:2,eligibleDressIds:['gown1','gown2'],
+    services:[initialPackage().services[0],
+      {id:'veil',name:'Veil Rental',kind:'Optional',description:'',priceCents:8000,serviceType:'package-veil'},
+      {id:'extras',name:'Bridal Accessories',kind:'Add-on',description:'',priceCents:0,serviceType:'item-priced-accessories'}]};
+  await assert.rejects(f.service.save('manager',config),fail('PACKAGE_ACCESSORY_APPROVAL_REQUIRED'));
+  await assert.rejects(f.service.save('manager',{...config,accessoryPricingApproved:true,
+    services:[...config.services,initialPackage().services[1]]}),fail('INVALID_PACKAGE_ACCESSORY_PRICING'));
+  await f.service.save('manager',{...config,accessoryPricingApproved:true});
+  assert.equal((await f.service.catalogue('bride',true)).packages.length,0);
+  assert.equal((await f.service.catalogue('bride',true,true)).packages.length,1);
+  assert.equal((await f.store.get(`packageSelections/${old.id}`)).totalCents,old.totalCents);
+  for(const {id} of accessoryCatalogue.items)f.store.data.set(`accessoryStock/${id}`,{quantity:1,allocations:{}});
+  const input={...f.input,revision:3,rentalPlan:availabilityPlan,removedIds:['veil'],addonIds:[],
+    expectedTotalCents:242000,accessoryCatalogueVersion:accessoryCatalogue.version};
+  let seq=0;
+  const save=patch=>f.service.select('bride',{...input,requestId:`item-${++seq}`,...patch});
+  assert.equal((await save({})).totalCents,242000);
+  await assert.rejects(save({addonIds:['extras']}),fail('PACKAGE_ACCESSORY_SELECTION_REQUIRED'));
+  await assert.rejects(save({removedIds:[]}),fail('PACKAGE_ACCESSORY_SELECTION_REQUIRED'));
+  const row=(itemId,serviceId='extras')=>({itemId,serviceId});
+  const included=await save({removedIds:[],expectedTotalCents:250000,accessories:[row('veil-long','veil')]});
+  assert.equal(included.accessoryExtraCents,0);
+  await assert.rejects(save({removedIds:[],accessories:[row('veil-short','veil'),row('veil-long','veil')]}),fail('INVALID_ACCESSORY_SELECTION'));
+  const tests=[
+    [5500,['tiara']],
+    [5000,['ring-solitaire','hair-comb']],
+    [15000,['tiara','necklace-floral','ring-halo']],
+    [17000,['tiara','necklace-floral','ring-halo','earrings-pearl']],
+  ];
+  for(const [cents,ids] of tests){
+    const chosen=await save({addonIds:['extras'],accessories:ids.map(id=>row(id)),expectedTotalCents:242000+cents});
+    assert.equal(chosen.accessoryCharges[0].extraCents,cents);
+    assert.equal(chosen.accessoryCharges[0].allowanceCents,undefined);
+    assert.equal(chosen.totalCents,242000+cents);
+    const due=packagePaymentQuote(chosen.totalCents,2,5000);
+    assert.equal(due.depositCents,Math.round(chosen.totalCents/2)-5000);
+    assert.equal(due.securityCents,60000);
+  }
+  await assert.rejects(save({addonIds:['extras'],accessories:[row('tiara')]}),fail('PACKAGE_CHANGED'));
+  await assert.rejects(save({addonIds:['extras'],accessories:[{...row('tiara'),priceCents:1}]}),fail('INVALID_ACCESSORY_SELECTION'));
+  f.store.data.set('accessoryStock/tiara',{quantity:0,allocations:{}});
+  await assert.rejects(save({addonIds:['extras'],accessories:[row('tiara')],expectedTotalCents:247500}),fail('RENTAL_STOCK_UNAVAILABLE'));
+});
 async function availabilityFixture() {
   const f=await gownFixture();
   f.query={packageId:f.packageData.id,revision:2,removedIds:['styling'],addonIds:['makeup'],rentalPlan:availabilityPlan};

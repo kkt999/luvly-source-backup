@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 import 'package:luvly_app/packages/package_api.dart';
 import 'package:luvly_app/packages/package_rental_screen.dart';
 import 'package:luvly_app/packages/fitting_result_screen.dart';
+import 'package:luvly_app/packages/fitting_proposal_screen.dart';
 import 'package:luvly_app/payments/payment_api.dart';
 import 'package:luvly_app/planning/planning_api.dart';
 import 'package:luvly_app/src/design.dart' show luvlyTheme;
@@ -57,6 +58,134 @@ Future<void> scrollTo(WidgetTester t, String label) async {
 }
 
 void main() {
+  testWidgets('older servers still let staff confirm makeup timing', (t) async {
+    viewport(t, const Size(1150, 1000));
+    final api = HttpPackageApi(
+      transport: HttpPaymentApi(
+        baseUrl: 'https://example.com',
+        token: () async => 'test-token',
+        client: MockClient(
+          (_) async => http.Response('{"error":"NOT_FOUND"}', 404),
+        ),
+      ),
+    );
+    addTearDown(api.close);
+    final selected = selection();
+    selected.data['services'] = [
+      const PackageServiceItem(
+        id: 'makeup-hair',
+        name: 'Bridal makeup',
+        description: '',
+        kind: 'Required',
+        priceCents: 0,
+      ).toJson(),
+    ];
+    selected.data['fittingDecision'] = {'adjustment': 'None'};
+    await show(
+      t,
+      FittingQuoteEditor(selection: selected, api: api, manager: false),
+    );
+    await t.pumpAndSettle();
+    expect(find.widgetWithText(TextField, 'Bridal makeup'), findsOneWidget);
+    expect(t.takeException(), isNull);
+  });
+
+  testWidgets(
+    'makeup proposal reuses the wedding date and selected trial booking',
+    (t) async {
+      viewport(t, const Size(1150, 1000));
+      final calls = <http.Request>[];
+      final api = HttpPackageApi(
+        transport: HttpPaymentApi(
+          baseUrl: 'https://example.com',
+          token: () async => 'test-token',
+          client: MockClient((request) async {
+            calls.add(request);
+            return http.Response(
+              jsonEncode(
+                request.method == 'GET'
+                    ? {
+                        'artists': [
+                          {'id': 'artist', 'name': 'Test Artist'},
+                        ],
+                        'trials': [
+                          {
+                            'id': 'trial',
+                            'day': '2026-10-15',
+                            'minuteOfDay': 840,
+                            'artistName': 'Test Artist',
+                            'revision': 3,
+                          },
+                        ],
+                      }
+                    : {},
+              ),
+              200,
+            );
+          }),
+        ),
+      );
+      addTearDown(api.close);
+      final formal = const PackageServiceItem(
+        id: 'formal',
+        name: 'Bridal makeup',
+        description: '',
+        kind: 'Required',
+        priceCents: 0,
+        serviceType: PackageServiceType.makeupHair,
+      ).toJson();
+      final trial = const PackageServiceItem(
+        id: 'trial-service',
+        name: 'Makeup trial',
+        description: '',
+        kind: 'Add-on',
+        priceCents: 20000,
+        serviceType: PackageServiceType.makeupTrial,
+      ).toJson();
+      final selected = selection();
+      selected.data['services'] = [formal, trial];
+      selected.data['fittingDecision'] = {'adjustment': 'None'};
+      selected.data['fittingQuote'] = {
+        'servicePlan': [
+          {
+            'serviceId': 'formal',
+            'timing': 'Previously selected',
+            'schedule': {'artistId': 'artist', 'minuteOfDay': 540},
+          },
+        ],
+      };
+      await show(
+        t,
+        FittingQuoteEditor(selection: selected, api: api, manager: false),
+      );
+      await t.pumpAndSettle();
+      expect(find.text('Makeup & hair'), findsOneWidget);
+      expect(find.text('17 Oct 2026'), findsOneWidget);
+      expect(find.text('09:00 MYT'), findsOneWidget);
+      await t.tap(find.text('Enter agreed time'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('15 Oct 2026 · 14:00 MYT · Test Artist').last);
+      await t.pumpAndSettle();
+      await t.enterText(
+        find.byType(TextField),
+        'The makeup arrangements are confirmed.',
+      );
+      await t.tap(find.text('Send for customer confirmation'));
+      await t.pumpAndSettle();
+      expect(calls.first.url.path, endsWith('/fitting-makeup-options'));
+      final body = jsonDecode(calls.last.body) as Map;
+      expect(body['serviceConfirmations'], [
+        {'serviceId': 'formal', 'artistId': 'artist', 'minuteOfDay': 540},
+        {
+          'serviceId': 'trial-service',
+          'appointmentId': 'trial',
+          'appointmentRevision': 3,
+        },
+      ]);
+      expect(t.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'no fitting requires explicit consent and saves choice without opening booking',
     (t) async {

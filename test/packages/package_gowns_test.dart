@@ -22,17 +22,20 @@ const testGown = CatalogueDress(
   published: true,
   revision: 2,
 );
-BridalPackage gownPackage({int count = 1}) => BridalPackage(
-  id: bridal.id,
-  name: bridal.name,
-  description: bridal.description,
-  basePriceCents: bridal.basePriceCents,
-  revision: bridal.revision,
-  active: true,
-  services: bridal.services,
-  includedGownCount: count,
-  eligibleDressIds: ['gown1'],
-);
+BridalPackage gownPackage({int count = 1, bool accessories = true}) =>
+    BridalPackage(
+      id: bridal.id,
+      name: bridal.name,
+      description: bridal.description,
+      basePriceCents: bridal.basePriceCents,
+      revision: bridal.revision,
+      active: true,
+      services: accessories
+          ? bridal.services
+          : bridal.services.where((s) => !s.isAccessory).toList(),
+      includedGownCount: count,
+      eligibleDressIds: ['gown1'],
+    );
 
 class GownPackages extends FakePackages {
   List<Map<String, dynamic>> savedGowns = [];
@@ -290,7 +293,10 @@ void main() {
       final api = GownPackages();
       await tester.pumpWidget(
         MaterialApp(
-          home: PackageChoiceScreen(package: gownPackage(), api: api),
+          home: PackageChoiceScreen(
+            package: gownPackage(accessories: false),
+            api: api,
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -309,7 +315,7 @@ void main() {
       );
       await tester.scrollUntilVisible(
         find.text('Explore wedding gowns'),
-        -300,
+        180,
         scrollable: find.byType(Scrollable).first,
       );
       final explore = find.text('Explore wedding gowns');

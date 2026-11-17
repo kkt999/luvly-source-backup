@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RentalService, HOLD_MS, rentalDates, variantId, peakUsage } from './rental_service.mjs';
 import { PaymentService } from './payment_service.mjs';
+import { selectionReferencesDress } from './firestore_store.mjs';
 
 class Store {
   data = new Map(); queue = Promise.resolve();
@@ -10,8 +11,13 @@ class Store {
     const promise = this.queue.then(async () => {
       const writes = new Map();
       const result = await fn({ get: path => { assert.equal(writes.size, 0, 'Read after write'); return this.get(path); },
-        set: (path, value) => writes.set(path, structuredClone(value)) });
-      for (const [path, value] of writes) this.data.set(path, value);
+        dressDeletionState: () => { assert.equal(writes.size, 0, 'Read after write'); return this.deletionState; },
+        set: (path, value) => writes.set(path, structuredClone(value)),
+        delete: path => writes.set(path, undefined) });
+      for (const [path, value] of writes) {
+        if (value === undefined) this.data.delete(path);
+        else this.data.set(path, value);
+      }
       return result;
     });
     this.queue = promise.catch(() => {}); return promise;
@@ -43,6 +49,44 @@ async function fixture(quantity = 1) {
   return { store, rentals, payments, input, pay, advance: ms => { now += ms; } };
 }
 const fails = code => e => e.code === code;
+test('only a manager can permanently remove an unused dress and its own stock and photo', async () => {
+  const { store, rentals } = await fixture();
+  store.data.set('staff/manager', { active: true, role: 'manager' });
+  store.data.set('staff/disabled', { active: false, role: 'manager' });
+  store.data.get('dresses/gown').revision = 2;
+  store.data.set('dressPhotos/gown', { revision: 1 });
+  store.data.set('dressPhotos/other', { revision: 1 });
+  store.data.set('dressArJobs/gown/photos/1', {state:'failed'});
+  const variant = variantId('gown', 'M');
+  for (const uid of ['staff', 'customer', 'disabled'])
+    await assert.rejects(rentals.deleteDress(uid, 'gown', { revision: 2 }), fails('MANAGER_REQUIRED'));
+  await assert.rejects(rentals.deleteDress('manager', 'gown', { revision: 1 }), fails('DRESS_DELETE_CHANGED'));
+  for (const [state, code] of [[{inUse:true}, 'DRESS_IN_USE'], [{arInUse:true}, 'DRESS_AR_IN_USE']]) {
+    store.deletionState = state;
+    await assert.rejects(rentals.deleteDress('manager', 'gown', { revision: 2 }), fails(code));
+    assert.ok(await store.get('dressPhotos/gown'));
+    assert.ok(await store.get(`rentalVariants/${variant}`));
+  }
+  store.deletionState = {variantIds:[variant],failedArJobIds:['1']};
+  assert.deepEqual(await rentals.deleteDress('manager', 'gown', { revision: 2 }), {deleted:true});
+  assert.deepEqual(await rentals.deleteDress('manager', 'gown', { revision: 2 }), {deleted:true});
+  assert.equal(await store.get('dresses/gown'), undefined);
+  assert.equal(await store.get('dressPhotos/gown'), undefined);
+  assert.equal(await store.get(`rentalVariants/${variant}`), undefined);
+  assert.equal(await store.get('dressArJobs/gown/photos/1'), undefined);
+  assert.ok(await store.get('dressPhotos/other'));
+});
+
+test('a dress replaced in an older package or fitting decision remains protected', () => {
+  const old = {dressId:'old-dress',size:'M'}, current = {dressId:'new-dress',size:'S'};
+  assert.equal(selectionReferencesDress({
+    selectedGowns:[current], selectionHistory:[{selectedGowns:[old]}],
+  }, old.dressId), true);
+  assert.equal(selectionReferencesDress({
+    selectedGowns:[current], fittingDecisionHistory:[{gownChange:{from:[old],to:[current]}}],
+  }, old.dressId), true);
+  assert.equal(selectionReferencesDress({selectedGowns:[current]}, old.dressId), false);
+});
 test('measurements are staff-controlled, versioned, preserved by quantity-only edits and explicitly clearable', async () => {
   const f = await fixture();
   const input = {dressId:'gown',size:'M',quantity:1,revision:1,
