@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'measurement_provenance.dart';
 
 /// Ratios of detected joint spans in a front-facing image. No centimetres,
 /// circumferences, body-shape diagnosis, or fitted garment size.
@@ -84,7 +85,7 @@ class BodyScanner {
   const BodyScanner();
   bool get available =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-  Future<Map<String, double>?> estimateMeasurements(double heightCm) async {
+  Future<BodyMeasurementEstimate?> estimateMeasurements(double heightCm) async {
     if (!available || !heightCm.isFinite || heightCm < 120 || heightCm > 220) {
       throw PlatformException(code: 'SCAN_UNAVAILABLE');
     }
@@ -93,16 +94,14 @@ class BodyScanner {
           'heightCm': heightCm,
         });
     if (raw == null) return null;
-    const labels = ['Bust', 'Waist', 'Hips'];
-    final measurements = <String, double>{};
-    for (final label in labels) {
-      final n = raw[label];
-      if (n is! num || !n.isFinite || n < 30 || n > 300) {
-        throw const FormatException('Invalid measurement estimate');
-      }
-      measurements[label] = n.toDouble();
-    }
-    return measurements;
+    return BodyMeasurementEstimate.fromJson({
+      'measurements': {
+        for (final label in circumferenceLabels) label: raw[label],
+      },
+      'heightCm': raw['heightCm'],
+      'capturedAt': raw['capturedAt'],
+      'methodVersion': raw['methodVersion'],
+    });
   }
 
   Future<BodyScan?> scan() async {

@@ -21,6 +21,8 @@ import 'customer_package_card.dart';
 import 'customer_package_details.dart';
 import 'staff_package_catalogue.dart';
 import 'package_editor.dart';
+import 'service_pricing_editor.dart';
+import 'custom_package_builder.dart';
 import '../shared/list_controls.dart';
 import '../support/assistant_launcher.dart';
 export 'rental_workspace.dart' show customerRentalStage;
@@ -135,11 +137,39 @@ class _LivePackageState extends State<LivePackageScreen> {
     if (!canManage) return;
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => PackageEditor(api: api, package: package),
+        builder: (_) => api is HttpPackageApi
+            ? ServicePricingEditor(
+                api: api as HttpPackageApi,
+                package: package,
+                onPreview: (preview) => Navigator.push<void>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => PackageChoiceScreen(
+                      package: preview,
+                      api: api,
+                      readOnly: true,
+                    ),
+                  ),
+                ),
+              )
+            : PackageEditor(api: api, package: package),
       ),
     );
     if (saved == true) {
-      message('Package saved.');
+      message('Package published.');
+    }
+    if (mounted) reload();
+  }
+
+  Future<void> buildCustomPackage() async {
+    final transport = api;
+    if (transport is! HttpPackageApi) return;
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => CustomPackageBuilder(api: transport)),
+    );
+    if (changed == true && mounted) {
+      setState(() => selectedTab = true);
       reload();
     }
   }
@@ -196,6 +226,7 @@ class _LivePackageState extends State<LivePackageScreen> {
   }
 
   Future<void> toggle(BridalPackage p) async {
+    if (p.serviceBased) return edit(p);
     if (!canManage) return;
     if (!p.active) {
       await edit(p);
@@ -241,6 +272,10 @@ class _LivePackageState extends State<LivePackageScreen> {
   }
 
   Future<void> remove(BridalPackage package) async {
+    if (package.serviceBased) {
+      message('Set the package inactive in its editor and publish the change.');
+      return;
+    }
     if (!canManage || api is! PackageDeletionApi || busy) return;
     final accepted = await showDialog<bool>(
       context: context,
@@ -279,6 +314,8 @@ class _LivePackageState extends State<LivePackageScreen> {
           name: model.name,
           phone: model.phone,
           packageName: selection.name,
+          packageAppointmentType:
+              selection.data['serviceAppointmentType'] as String?,
           fittingIncluded: selection.data['rental']?['state'] == 'Locked',
           onSubmitted: () => booked = true,
           latestAppointmentDay:
@@ -294,6 +331,10 @@ class _LivePackageState extends State<LivePackageScreen> {
                         ? 0
                         : 1,
                   ),
+                )
+              : selection.data['serviceOnly'] == true
+              ? DateTime.tryParse(
+                  selection.data['rentalPlan']?['eventDate'] ?? '',
                 )
               : null,
           submitRequest: (type, start, notes) =>
@@ -746,6 +787,20 @@ class _LivePackageState extends State<LivePackageScreen> {
                         const PackageEditorialHeader(),
                         const SizedBox(height: 6),
                       ],
+                      if (!widget.staff &&
+                          !selectedTab &&
+                          api is HttpPackageApi)
+                        Card.outlined(
+                          child: ListTile(
+                            leading: const Icon(Icons.tune),
+                            title: const Text('Build your own package'),
+                            subtitle: const Text(
+                              'Choose your gowns, services and accessories.',
+                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: buildCustomPackage,
+                          ),
+                        ),
                       if (widget.staff) ...[
                         Text(
                           rentalWorkspace

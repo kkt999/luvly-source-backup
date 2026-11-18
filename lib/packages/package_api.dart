@@ -11,6 +11,15 @@ String packageRequestId() => List.generate(
 ).join();
 String packageMoney(int cents) => formatRinggit(cents);
 
+String packagePricingLoadError(
+  Object? error, {
+  required String unavailable,
+  required String updateRequired,
+}) => switch (error) {
+  PaymentFailure(code: 'NOT_FOUND') => updateRequired,
+  PaymentFailure(:final message) => message,
+  _ => unavailable,
+};
 const packageGownSecurityCents = 30000;
 
 enum PackageServiceType {
@@ -23,6 +32,7 @@ enum PackageServiceType {
   extraRentalDay('extra-rental-day', 'Additional rental day'),
   packageVeil('package-veil', 'Veil Rental'),
   itemAccessories('item-priced-accessories', 'Bridal Accessories'),
+  itemVeil('item-priced-veil', 'Veil Rental'),
   veil('veil-rental', 'Veil rental'),
   jewellery('accessory-rental', 'Jewellery & accessories'),
   veilAndJewellery('veil-accessories', 'Veil & jewellery');
@@ -39,7 +49,10 @@ enum PackageServiceType {
     _ => false,
   };
   bool get includesVeils =>
-      this == veil || this == packageVeil || this == veilAndJewellery;
+      this == veil ||
+      this == packageVeil ||
+      this == itemVeil ||
+      this == veilAndJewellery;
   bool get includesJewellery =>
       this == jewellery || this == itemAccessories || this == veilAndJewellery;
   bool get isAccessory => includesVeils || includesJewellery;
@@ -81,7 +94,9 @@ class PackageServiceItem {
       serviceType?.includesJewellery ??
       RegExp(r'accessor|jewel|tiara', caseSensitive: false).hasMatch(name);
   bool get isAccessory => includesVeils || includesJewellery;
-  bool get itemPriced => serviceType == PackageServiceType.itemAccessories;
+  bool get itemPriced =>
+      serviceType == PackageServiceType.itemAccessories ||
+      serviceType == PackageServiceType.itemVeil;
   bool get packageVeil => serviceType == PackageServiceType.packageVeil;
   bool get usesAccessoryAllowance => isAccessory && !itemPriced && !packageVeil;
   int get allowanceCents => accessoryAllowanceCents ?? priceCents;
@@ -145,11 +160,17 @@ class BridalPackage {
     this.eligibleDressIds = const [],
     this.allCatalogueGowns = false,
     this.draft = false,
+    this.serviceBased = false,
+    this.pendingDraft = false,
     this.accessoryPricingApproved = false,
   });
   final String id, name, description;
   final int basePriceCents, revision;
-  final bool active, draft, accessoryPricingApproved;
+  final bool active,
+      draft,
+      accessoryPricingApproved,
+      serviceBased,
+      pendingDraft;
   String get statusLabel => active
       ? 'Active'
       : draft
@@ -167,6 +188,8 @@ class BridalPackage {
     revision: d['revision'],
     active: d['active'],
     draft: d['draft'] == true,
+    serviceBased: d['pricingModel'] == 'service-based',
+    pendingDraft: d['pendingDraft'] == true,
     includedGownCount: d['includedGownCount'] ?? 0,
     eligibleDressIds: List<String>.from(d['eligibleDressIds'] ?? []),
     allCatalogueGowns: d['allCatalogueGowns'] == true,
@@ -310,7 +333,7 @@ class HttpPackageApi
   @override
   Future<List<BridalPackage>> catalogue() async {
     final data = await transport.businessRequest(
-      '/v1/packages?serviceTypes=1&itemPricing=1&veilUpgrades=1',
+      '/v1/packages?serviceTypes=1&itemPricing=1&veilUpgrades=1&servicePricing=1',
     );
     return (data['packages'] as List)
         .map((d) => BridalPackage.fromJson(Map<String, dynamic>.from(d)))

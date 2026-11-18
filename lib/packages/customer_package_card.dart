@@ -397,6 +397,21 @@ CustomerPackageStep customerPackageStep(PackageSelection s, {DateTime? now}) {
       targetId: target,
     );
   }
+  if (s.data['serviceOnly'] == true &&
+      !s.appointments.any((item) => item['status'] == 'Completed')) {
+    if (s.data['serviceAppointmentType'] is String) {
+      return const CustomerPackageStep(
+        'Service quote saved',
+        'Choose an available appointment time for your service.',
+        'Choose appointment time',
+        CustomerPackageAction.fitting,
+      );
+    }
+    return info(
+      'Service quote saved',
+      'Contact Luvly to arrange the timing and payment for your selected services.',
+    );
+  }
   if (s.data['fittingChoice']?['mode'] == 'SkipFitting') {
     return info(
       'No-fitting request sent',
@@ -527,7 +542,8 @@ class CustomerPackageCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (rentalStatus != null)
+                if (rentalStatus != null &&
+                    selection.data['serviceOnly'] != true)
                   Semantics(
                     label: 'Package rental: $rentalStatus',
                     excludeSemantics: true,
@@ -539,7 +555,10 @@ class CustomerPackageCard extends StatelessWidget {
               ],
             ),
             const Divider(height: 20),
-            _PackageDates(view: view),
+            if (selection.data['serviceOnly'] == true)
+              Text('Event date · ${view.event}')
+            else
+              _PackageDates(view: view),
             if (visit != null) ...[
               const SizedBox(height: 10),
               _LinkedVisit(visit: visit, now: view.now),

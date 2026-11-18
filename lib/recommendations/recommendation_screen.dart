@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../catalogue/catalogue_repository.dart';
 import '../catalogue/catalogue_widgets.dart';
@@ -9,6 +10,7 @@ import '../workspace/workspace_api.dart' show workspaceError;
 import 'recommendation_api.dart';
 import 'recommendation_engine.dart';
 import 'body_scan.dart';
+import 'measurement_provenance.dart';
 import 'body_measurement_scan_screen.dart';
 import 'body_scan_screen.dart';
 
@@ -20,7 +22,28 @@ class PersonalizedGownsScreen extends StatefulWidget {
   State<PersonalizedGownsScreen> createState() => _PersonalizedGownsState();
 }
 
-class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
+class _PersonalizedGownsState extends State<PersonalizedGownsScreen>
+    with WidgetsBindingObserver {
+  StreamSubscription<({String uid, int revision})>? profileChanges;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    profileChanges = RecommendationProfileChanges.changes.listen((event) {
+      if (mounted &&
+          event.uid == uid &&
+          (record == null || event.revision > record!.revision)) {
+        load();
+      }
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && uid != null) load();
+  }
+
   late final api = widget.api ?? RecommendationApi();
   PreferenceRecord? record;
   String? uid, error;
@@ -40,7 +63,10 @@ class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
 
   Future<void> load() async {
     final g = ++generation;
-    setState(() => error = null);
+    setState(() {
+      error = null;
+      record = null;
+    });
     try {
       final value = await api.load();
       if (mounted && g == generation) setState(() => record = value);
@@ -49,20 +75,31 @@ class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
     }
   }
 
-  Future<void> edit() async {
+  Future<void> edit({bool measurementsOnly = false}) async {
     final current = uid;
     final result = await Navigator.push<PreferenceRecord>(
       context,
-      MaterialPageRoute(builder: (_) => BridalPreferencesEditor(api: api)),
+      MaterialPageRoute(
+        builder: (_) => BridalPreferencesEditor(
+          api: api,
+          measurementsOnly: measurementsOnly,
+        ),
+      ),
     );
     if (mounted && current == uid && result != null) {
-      setState(() => record = result);
+      generation++;
+      setState(() {
+        record = result;
+        error = null;
+      });
     }
   }
 
   @override
   void dispose() {
     generation++;
+    WidgetsBinding.instance.removeObserver(this);
+    profileChanges?.cancel();
     if (widget.api == null) api.close();
     super.dispose();
   }
@@ -97,6 +134,12 @@ class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
     final p = record!.preferences,
         guide = proportionGuide(p),
         matches = recommendGowns(snapshot.dresses, p);
+    final inputLabels = [
+      if (p.styles.isNotEmpty) 'Style preferences',
+      if (guide != null) 'Body proportions',
+      if (guide == null && p.useScanProportions) 'Camera proportion ideas',
+      if (p.colours.isNotEmpty) 'Colour preferences',
+    ];
     final personalized =
         p.styles.isNotEmpty ||
         p.colours.isNotEmpty ||
@@ -144,8 +187,41 @@ class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
                 Text(
                   'Gown budget · up to RM ${(p.maxPriceCents! / 100).toStringAsFixed(2)}',
                 ),
-              if (guide != null)
+              if (guide != null) ...[
                 Text('Optional proportion guide · ${guide.label}'),
+                gap(6),
+                Text(guide.description),
+                gap(6),
+                Text(
+                  guide.explanation,
+                  style: const TextStyle(fontSize: 12, color: muted),
+                ),
+                gap(6),
+                Text(
+                  p.measurementProvenance.summary,
+                  style: const TextStyle(fontSize: 12, color: muted),
+                ),
+                const Text(
+                  'An approximate styling guide from your chosen measurements.',
+                  style: TextStyle(fontSize: 12, color: muted),
+                ),
+              ] else ...[
+                const Text('Body type unavailable'),
+                Text(
+                  circumferenceLabels.every(p.measurements.containsKey)
+                      ? 'Your measurements are saved. Body-based styling is turned off.'
+                      : 'Add bust, waist and hip measurements to include a body proportion guide.',
+                  style: const TextStyle(fontSize: 12, color: muted),
+                ),
+                TextButton(
+                  onPressed: () => edit(measurementsOnly: true),
+                  child: Text(
+                    circumferenceLabels.every(p.measurements.containsKey)
+                        ? 'Use my body measurements for recommendations'
+                        : 'Complete body profile',
+                  ),
+                ),
+              ],
               if (p.useScanProportions && p.bodyScan != null)
                 Text(
                   guide == null
@@ -153,6 +229,12 @@ class _PersonalizedGownsState extends State<PersonalizedGownsScreen> {
                       : 'Camera scan saved · manual guide takes priority',
                 ),
               gap(12),
+              Text(
+                inputLabels.isEmpty
+                    ? 'Choose preferences to calculate a style score.'
+                    : 'Scoring inputs · ${inputLabels.join(' · ')}',
+                style: const TextStyle(fontSize: 12, color: muted),
+              ),
               OutlinedButton.icon(
                 key: const Key('edit-bridal-preferences'),
                 onPressed: edit,
@@ -269,14 +351,19 @@ class _RecommendationCard extends StatelessWidget {
                       d.category,
                       style: const TextStyle(color: muted, fontSize: 12),
                     ),
-                    if (match.score != null)
+                    if (match.validScore != null)
                       Text(
-                        'Style match ${match.score}/100',
+                        'Style match ${match.validScore}/100',
                         style: const TextStyle(
                           color: rose,
                           fontWeight: FontWeight.w600,
                           fontSize: 12,
                         ),
+                      )
+                    else
+                      const Text(
+                        'Score unavailable',
+                        style: TextStyle(color: muted, fontSize: 12),
                       ),
                   ],
                 ),
@@ -372,6 +459,7 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
   bool useProportions = false, shareProportionStats = false, busy = false;
   BodyScan? bodyScan;
   bool useScanProportions = false;
+  MeasurementProvenance provenance = const MeasurementProvenance();
   int generation = 0;
   @override
   void didChangeDependencies() {
@@ -409,6 +497,7 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
           ..clear()
           ..addAll(p.colours);
         useProportions = p.useProportions;
+        provenance = p.measurementProvenance;
         shareProportionStats = p.shareProportionStats;
         bodyScan = p.bodyScan;
         useScanProportions = p.useScanProportions;
@@ -432,8 +521,7 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
         if (e.value.text.trim().isNotEmpty)
           e.key: double.parse(e.value.text.trim()),
     };
-    if (!widget.measurementsOnly &&
-        useProportions &&
+    if (useProportions &&
         !['Bust', 'Waist', 'Hips'].every(measurements.containsKey)) {
       setState(
         () => error =
@@ -441,21 +529,20 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
       );
       return;
     }
-    final next =
-        (widget.measurementsOnly
-                ? record!.preferences.withMeasurements(measurements)
-                : BridalPreferences(
-                    measurements: measurements,
-                    styles: styles.toList(),
-                    colours: colours.toList(),
-                    useProportions: useProportions,
-                    shareProportionStats:
-                        useProportions && shareProportionStats,
-                    maxPriceCents: budget.text.trim().isEmpty
-                        ? null
-                        : parsePriceCents(budget.text.trim()),
-                  ))
-            .withBodyScan(bodyScan, useScanProportions);
+    final complete = circumferenceLabels.every(measurements.containsKey);
+    final next = BridalPreferences(
+      measurements: measurements,
+      measurementProvenance: provenance.retained(measurements.keys.toSet()),
+      styles: styles.toList(),
+      colours: colours.toList(),
+      useProportions: useProportions && complete,
+      shareProportionStats: useProportions && complete && shareProportionStats,
+      maxPriceCents: budget.text.trim().isEmpty
+          ? null
+          : parsePriceCents(budget.text.trim()),
+      bodyScan: bodyScan,
+      useScanProportions: useScanProportions,
+    );
     final encoded = jsonEncode(next.toJson());
     if (encoded != pendingJson) {
       pendingJson = encoded;
@@ -476,7 +563,29 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
         }
         model.changed();
       }
-      if (mounted) Navigator.pop(context, result);
+      RecommendationProfileChanges.saved(uid!, result.revision);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              widget.measurementsOnly
+                  ? 'Body information updated.'
+                  : 'Preferences updated.',
+            ),
+          ),
+        );
+        Navigator.pop(context, result);
+      }
+    } on PreferenceSaveFailure catch (e) {
+      if (mounted && g == generation) {
+        record = e.saved;
+        pendingJson = null;
+        pendingId = null;
+        setState(
+          () => error =
+              'The server did not retain measurement sources. Ask Luvly to update the body-profile service, then save again.',
+        );
+      }
     } catch (e) {
       if (mounted && g == generation) setState(() => error = workspaceError(e));
     } finally {
@@ -509,12 +618,17 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
     if (busy || record == null) return;
     final request = generation;
     setState(() => busy = true);
-    final checked = await Navigator.push<Map<String, double>>(
+    final checked = await Navigator.push<ReviewedMeasurements>(
       context,
       MaterialPageRoute(
         builder: (_) => BodyMeasurementScanScreen(
           scanner: widget.scanner,
           initialHeight: fields['Height']!.text,
+          existingMeasurements: {
+            for (final label in circumferenceLabels)
+              if (double.tryParse(fields[label]!.text) case final double value)
+                label: value,
+          },
         ),
       ),
     );
@@ -522,7 +636,8 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
     setState(() {
       busy = false;
       if (checked != null) {
-        for (final entry in checked.entries) {
+        provenance = checked.provenance;
+        for (final entry in checked.measurements.entries) {
           fields[entry.key]!.text = entry.value.toString().replaceFirst(
             RegExp(r'\.0$'),
             '',
@@ -756,6 +871,28 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
                           : (v) => setState(() => shareProportionStats = v),
                     ),
                 ],
+                if (widget.measurementsOnly) ...[
+                  Text(
+                    provenance.summary,
+                    style: const TextStyle(fontSize: 12, color: muted),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Use my body measurements for recommendations',
+                    ),
+                    subtitle: const Text(
+                      'Choose whether your saved bust, waist and hips contribute to styling suggestions.',
+                    ),
+                    value: useProportions,
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() {
+                            useProportions = value;
+                            if (!value) shareProportionStats = false;
+                          }),
+                  ),
+                ],
                 if (widget.measurementsOnly || useProportions) ...[
                   gap(8),
                   const Text(
@@ -791,6 +928,22 @@ class _BridalPreferencesEditorState extends State<BridalPreferencesEditor> {
                         labelText: key == 'Shoulder' ? 'Shoulder width' : key,
                         suffixText: key == 'Weight' ? 'kg' : 'cm',
                       ),
+                      onChanged: (value) {
+                        if (circumferenceLabels.contains(key)) {
+                          setState(() {
+                            provenance = provenance.manual(
+                              key,
+                              present: value.trim().isNotEmpty,
+                              at: DateTime.now().millisecondsSinceEpoch,
+                            );
+                            if (value.trim().isEmpty &&
+                                widget.measurementsOnly) {
+                              useProportions = false;
+                              shareProportionStats = false;
+                            }
+                          });
+                        }
+                      },
                       validator: (v) {
                         if (v!.trim().isEmpty) return null;
                         final n = double.tryParse(v.trim()),

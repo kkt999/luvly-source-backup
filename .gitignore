@@ -65,6 +65,10 @@ app.*.map.json
 **/.firebase/
 **/.cxx/
 **/build/
+# Bundled Three.js runtime sources are app assets, not generated build output.
+!android/app/src/main/assets/makeup/three/build/
+!android/app/src/main/assets/makeup/three/build/three.module.js
+!android/app/src/main/assets/makeup/three/build/three.core.js
 **/failures/
 /output/
 /work/

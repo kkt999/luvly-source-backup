@@ -124,7 +124,10 @@ class MainActivity : FlutterActivity() {
             else if(data.getBooleanExtra("measurementEstimate",false))reply?.success(mapOf(
                 "Bust" to data.getDoubleExtra("bustCm",Double.NaN),
                 "Waist" to data.getDoubleExtra("waistCm",Double.NaN),
-                "Hips" to data.getDoubleExtra("hipsCm",Double.NaN)))
+                "Hips" to data.getDoubleExtra("hipsCm",Double.NaN),
+                "heightCm" to data.getDoubleExtra("heightCm",Double.NaN),
+                "capturedAt" to data.getLongExtra("capturedAt",0),
+                "methodVersion" to data.getStringExtra("methodVersion")))
             else reply?.success(mapOf("algorithmVersion" to data.getStringExtra("algorithmVersion"),
                 "shoulderHipRatio" to data.getDoubleExtra("shoulderHipRatio",Double.NaN),
                 "torsoShoulderRatio" to data.getDoubleExtra("torsoShoulderRatio",Double.NaN),

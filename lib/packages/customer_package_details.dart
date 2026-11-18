@@ -3,6 +3,7 @@ import '../bookings/booking_repository.dart' show bookingStatusLabel;
 import '../payments/payment_api.dart';
 import '../promotions/promotion_screen.dart';
 import 'package_api.dart';
+import 'custom_package_builder.dart';
 import 'customer_package_card.dart';
 import 'rental_workspace.dart' hide rentalDateLabel;
 import 'rental_date_fields.dart';
@@ -94,7 +95,11 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
     } on PaymentFailure {
       validInvoice = false;
     }
-    final editable = s.data['rentalId'] == null && s.data['invoiceId'] == null;
+    final editable =
+        s.data['rentalId'] == null &&
+        s.data['invoiceId'] == null &&
+        (s.data['serviceOnly'] != true || s.appointments.isEmpty);
+    final custom = s.data['packageType'] == 'Custom';
     final plan = s.data['rentalPlan'] as Map?;
     final completeDates =
         plan != null &&
@@ -125,6 +130,24 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
             padding: const EdgeInsets.all(20),
             children: [
               if (loading) const LinearProgressIndicator(),
+              if (custom && editable && widget.api is HttpPackageApi)
+                OutlinedButton(
+                  onPressed: blocked
+                      ? null
+                      : () async {
+                          final updated = await Navigator.push<bool>(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => CustomPackageBuilder(
+                                api: widget.api as HttpPackageApi,
+                                selection: selection,
+                              ),
+                            ),
+                          );
+                          if (updated == true && mounted) await refresh();
+                        },
+                  child: const Text('Edit custom package'),
+                ),
               if (error != null) ...[
                 Text(
                   error!,
@@ -193,7 +216,9 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
                   ),
                 ),
               const SizedBox(height: 20),
-              if (completeDates)
+              if (s.data['serviceOnly'] == true && plan?['eventDate'] is String)
+                Text('Event date · ')
+              else if (completeDates)
                 RentalDatesSummary(
                   dates: {
                     for (final k in ['eventDate', 'pickupDate', 'returnDate'])
@@ -317,6 +342,7 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
                 ),
               const SizedBox(height: 16),
               if (editable &&
+                  s.data['serviceOnly'] != true &&
                   s.data['reusedFittingAppointmentId'] == null &&
                   step.action != CustomerPackageAction.fitting &&
                   !s.appointments.any(
@@ -340,7 +366,9 @@ class _CustomerPackageDetailsState extends State<CustomerPackageDetails> {
                         ),
                   child: const Text('Change fitting preference'),
                 ),
-              if (widget.api is HttpPackageApi && validInvoice)
+              if (widget.api is HttpPackageApi &&
+                  validInvoice &&
+                  s.data['serviceOnly'] != true)
                 AbsorbPointer(
                   absorbing: blocked,
                   child: PackageRentalSummary(

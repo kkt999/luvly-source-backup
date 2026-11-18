@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:luvly_app/workspace/notifications.dart';
 import 'package:luvly_app/admin/main.dart';
+import 'package:luvly_app/admin/analytics_screen.dart' show ManagerReport;
 import 'package:luvly_app/admin/model.dart';
 import 'package:luvly_app/admin/overview.dart';
 import 'package:luvly_app/admin/portal_auth.dart';
@@ -171,7 +172,37 @@ void main() {
           // Read-only date filters/retry are connected; missing credentials
           // show an error, never the former prototype's fake report totals.
           expect(find.text('Analytics Dashboard'), findsOneWidget);
-          expect(find.text('Could not load dashboard data.'), findsOneWidget);
+          final breadcrumb = find.widgetWithText(TextButton, 'Reports');
+          for (final report in ManagerReport.values) {
+            final card = find.text(report.title);
+            await tester.ensureVisible(card);
+            await tester.tap(card);
+            await tester.pumpAndSettle();
+            expect(breadcrumb, findsOneWidget);
+            expect(find.text(report.breadcrumb), findsOneWidget);
+            expect(find.text('All reports'), findsNothing);
+            expect(find.text('Could not load this report.'), findsOneWidget);
+            await tester.tap(breadcrumb);
+            await tester.pumpAndSettle();
+            expect(find.text('Analytics Dashboard'), findsOneWidget);
+          }
+
+          // Browser history dispatches report locations to the root Router.
+          expect(
+            await tester.binding.handlePushRoute('/reports/collections'),
+            isTrue,
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Revenue Summary'), findsOneWidget);
+          expect(await tester.binding.handlePushRoute('/reports'), isTrue);
+          await tester.pumpAndSettle();
+          expect(find.text('Analytics Dashboard'), findsOneWidget);
+          expect(
+            await tester.binding.handlePushRoute('/reports/collections'),
+            isTrue,
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Revenue Summary'), findsOneWidget);
           expect(find.text('Generate Report'), findsNothing);
           expect(find.text('Export full CSV'), findsNothing);
           expect(tester.takeException(), isNull);

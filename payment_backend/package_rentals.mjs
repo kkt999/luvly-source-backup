@@ -158,6 +158,7 @@ export class PackageRentals {
     return this.store.atomic(async tx => {
       const staff=await tx.get(`staff/${uid}`),bride=await tx.get(`brides/${uid}`),s=await tx.get(`packageSelections/${selectionId}`);
       check(!staff && bride && s?.uid===uid,'SELECTION_ACCESS_DENIED',403);
+      check(s.serviceOnly !== true, 'PACKAGE_RENTAL_ITEMS_REQUIRED');
       check((s.rentalPlanRevision??0)===input.revision,'RENTAL_PLAN_CHANGED');
       const current=s.rentalId ? await tx.get(`rentals/${s.rentalId}`) : null;
       check(!current || ['Cancelled','Expired'].includes(current.state) || (current.state==='Held' && current.expiresAt<=this.now()),'RENTAL_ALREADY_EXISTS');
@@ -183,6 +184,7 @@ export class PackageRentals {
     return this.store.atomic(async tx=>{
       const staff=await tx.get(`staff/${uid}`),bride=await tx.get(`brides/${uid}`),s=await tx.get(`packageSelections/${selectionId}`);
       check(!staff&&bride&&s?.uid===uid,'SELECTION_ACCESS_DENIED',403);
+      check(s.serviceOnly !== true, 'PACKAGE_RENTAL_ITEMS_REQUIRED');
       check(!s.rentalId&&!s.invoiceId,'RENTAL_ALREADY_EXISTS');
       check((s.rentalPlanRevision??0)===input.revision,'RENTAL_PLAN_CHANGED');
       const plan={pickupDate:input.pickupDate,eventDate:input.eventDate,returnDate:input.returnDate};

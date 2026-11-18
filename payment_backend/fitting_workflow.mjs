@@ -38,6 +38,7 @@ export class FittingWorkflow{
     return this.store.atomic(async tx=>{
       const staff=await tx.get(`staff/${uid}`),bride=await tx.get(`brides/${uid}`),s=await tx.get(`packageSelections/${selectionId}`);
       check(!staff&&bride&&s?.uid===uid,'SELECTION_ACCESS_DENIED',403);
+      check(s.serviceOnly !== true, 'PACKAGE_RENTAL_ITEMS_REQUIRED');
       const rental=s.rentalId?await tx.get(`rentals/${s.rentalId}`):null;
       check(!rental||['Expired','Cancelled'].includes(rental.state),'RENTAL_ALREADY_EXISTS');
       check(input.mode!=='SkipFitting'||!s.reusedFittingAppointmentId,'COMPLETED_FITTING_ALREADY_LINKED');
@@ -67,6 +68,7 @@ export class FittingWorkflow{
     return this.store.atomic(async tx=>{
       const staff=await tx.get(`staff/${uid}`),s=await tx.get(`packageSelections/${selectionId}`);
       check(active(staff),'STAFF_REQUIRED',403);check(!!s,'SELECTION_ACCESS_DENIED',404);
+      check(s.serviceOnly !== true, 'PACKAGE_RENTAL_ITEMS_REQUIRED');
       const booking = input.mode === 'Attended'
         ? await tx.get(`appointments/${input.appointmentId}`)
         : null;

@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
 import 'package:luvly_app/packages/package_api.dart';
 import 'package:luvly_app/packages/package_screen.dart';
+import 'package:luvly_app/packages/service_pricing_editor.dart';
 import 'package:luvly_app/packages/package_presentation.dart';
 import 'package:luvly_app/payments/payment_api.dart';
 import 'package:luvly_app/catalogue/catalogue_repository.dart';
@@ -162,6 +163,64 @@ Future<void> tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets(
+    'Manager can save an incomplete pricing draft without publishing',
+    (tester) async {
+      final requests = <http.Request>[];
+      final api = HttpPackageApi(
+        transport: HttpPaymentApi(
+          baseUrl: 'https://example.com',
+          token: () async => 'manager',
+          client: MockClient((request) async {
+            requests.add(request);
+            final path = request.url.path;
+            if (path == '/v1/package-gown-limit') {
+              return http.Response('{"maxGowns":4}', 200);
+            }
+            if (path == '/v1/bridal-service-prices') {
+              return http.Response('{"services":[]}', 200);
+            }
+            if (path.endsWith('/draft') && request.method == 'GET') {
+              return http.Response('{"published":null,"draft":null}', 200);
+            }
+            if (path.endsWith('/draft') && request.method == 'POST') {
+              final body = jsonDecode(request.body);
+              expect(body['publishedRevision'], 0);
+              expect(body['configuration']['name'], 'New bridal package');
+              expect(body['configuration']['services'], isEmpty);
+              return http.Response('{"revision":1}', 200);
+            }
+            return http.Response('{}', 404);
+          }),
+        ),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ServicePricingEditor(api: api, onPreview: (_) {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Package name'),
+        'New bridal package',
+      );
+      await tester.tap(find.text('Save unpublished'));
+      await tester.pumpAndSettle();
+      expect(
+        requests.where(
+          (request) =>
+              request.method == 'POST' && request.url.path.endsWith('/draft'),
+        ),
+        hasLength(1),
+      );
+      expect(
+        requests.where((request) => request.url.path.endsWith('/publish')),
+        isEmpty,
+      );
+    },
+  );
+
   testWidgets(
     'Manager loads approved pricing into the editor without publishing',
     (tester) async {

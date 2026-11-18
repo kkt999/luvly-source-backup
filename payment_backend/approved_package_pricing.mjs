@@ -40,3 +40,5 @@ export function approvedPackagePricing(pkg) {
     ],
   };
 }
+
+export const approvedPackageTarget = id => approved.get(id)?.price;

@@ -8,6 +8,7 @@ import '../bookings/booking_repository.dart';
 import '../bookings/booking_api.dart';
 import '../support/support_repository.dart';
 import 'analytics_api.dart';
+import 'report_router.dart';
 
 class PortalApp extends StatefulWidget {
   const PortalApp({
@@ -31,6 +32,14 @@ class _PortalAppState extends State<PortalApp> {
   late final CatalogueRepository catalogue;
   late final AnalyticsApi analytics;
   late final BookingRepository bookings;
+  final backDispatcher = RootBackButtonDispatcher();
+  late final ReportRouter reportRouter = ReportRouter(
+    (_) => PortalEntry(session: session),
+    // Clear protected routes and dialogs whenever identity or access changes.
+    () => ValueKey(
+      '${session.phase}:${session.identity?.uid}:${session.access?.role}:${session.access?.boutiqueOperations}',
+    ),
+  );
   @override
   void initState() {
     super.initState();
@@ -47,6 +56,7 @@ class _PortalAppState extends State<PortalApp> {
   void dispose() {
     if (widget.session == null) session.dispose();
     if (widget.analytics == null) analytics.close();
+    reportRouter.dispose();
     super.dispose();
   }
 
@@ -64,15 +74,13 @@ class _PortalAppState extends State<PortalApp> {
             availableHoursForType: loadBookingHoursForType,
             child: ListenableBuilder(
               listenable: session,
-              builder: (context, _) => MaterialApp(
-                // Clear protected routes/dialogs whenever identity or access changes.
-                key: ValueKey(
-                  '${session.phase}:${session.identity?.uid}:${session.access?.role}:${session.access?.boutiqueOperations}',
-                ),
+              builder: (context, _) => MaterialApp.router(
+                routerDelegate: reportRouter,
+                routeInformationParser: const ReportRouteParser(),
+                backButtonDispatcher: backDispatcher,
                 title: 'Luvly Portal | Staff & Manager',
                 debugShowCheckedModeBanner: false,
                 theme: portalTheme,
-                home: PortalEntry(session: session),
               ),
             ),
           ),

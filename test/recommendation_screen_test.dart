@@ -9,6 +9,9 @@ import 'package:luvly_app/catalogue/catalogue_repository.dart';
 import 'package:luvly_app/catalogue/dress_photo_data.dart';
 import 'package:luvly_app/payments/payment_api.dart';
 import 'package:luvly_app/recommendations/recommendation_api.dart';
+import 'package:luvly_app/recommendations/body_scan.dart';
+import 'package:luvly_app/recommendations/measurement_provenance.dart';
+import 'body_measurement_scan_test.dart' show MeasurementScanner;
 import 'package:luvly_app/recommendations/recommendation_engine.dart';
 import 'package:luvly_app/recommendations/recommendation_screen.dart';
 import 'package:luvly_app/src/design.dart';
@@ -48,6 +51,7 @@ Future<void> mount(
   bool editor = false,
   bool measurementsOnly = false,
   bool large = false,
+  BodyScanner scanner = const BodyScanner(),
   BridalPreferences? initial,
   ValueChanged<String>? open,
 }) async {
@@ -93,6 +97,7 @@ Future<void> mount(
                           ? BridalPreferencesEditor(
                               api: api,
                               measurementsOnly: measurementsOnly,
+                              scanner: scanner,
                             )
                           : PersonalizedGownsScreen(
                               api: api,
@@ -153,6 +158,217 @@ Future<void> capture(WidgetTester t, String name) async {
 }
 
 void main() {
+  Future<void> tapControl(WidgetTester t, Finder finder) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    await t.pumpAndSettle();
+    await t.ensureVisible(finder);
+    await t.pumpAndSettle();
+    await t.tap(finder.hitTestable());
+    await t.pumpAndSettle();
+  }
+
+  testWidgets(
+    'manual source is saved without inventing a tape check or enabling body analysis',
+    (t) async {
+      final api = PreferenceApi();
+      await mount(
+        t,
+        api,
+        editor: true,
+        measurementsOnly: true,
+        initial: const BridalPreferences(
+          measurements: {'Bust': 90, 'Waist': 65, 'Hips': 92},
+        ),
+      );
+      final field = find.byKey(const ValueKey('body-Bust'));
+      await t.ensureVisible(field);
+      await t.enterText(field, '91');
+      await tapControl(t, find.byKey(const Key('save-bridal-preferences')));
+      expect(api.saved.single.useProportions, isFalse);
+      expect(
+        api.saved.single.measurementProvenance.fields['Bust']!.source,
+        'user-entered',
+      );
+      expect(
+        api.saved.single.measurementProvenance.fields['Bust']!.tapeCheckedAt,
+        isNull,
+      );
+      expect(find.text('Body information updated.'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'body-based recommendations require an explicit choice and preserve opt-out',
+    (t) async {
+      final api = PreferenceApi();
+      await mount(
+        t,
+        api,
+        editor: true,
+        measurementsOnly: true,
+        initial: const BridalPreferences(
+          measurements: {'Bust': 90, 'Waist': 65, 'Hips': 92},
+        ),
+      );
+      final choice = find.widgetWithText(
+        SwitchListTile,
+        'Use my body measurements for recommendations',
+      );
+      expect(t.widget<SwitchListTile>(choice).value, isFalse);
+      await tapControl(t, choice);
+      await tapControl(t, find.byKey(const Key('save-bridal-preferences')));
+      expect(api.saved.last.useProportions, isTrue);
+      expect(api.saved.last.shareProportionStats, isFalse);
+      await mount(t, api, editor: true, measurementsOnly: true);
+      await tapControl(t, choice);
+      await tapControl(t, find.byKey(const Key('save-bridal-preferences')));
+      expect(api.saved.last.useProportions, isFalse);
+    },
+  );
+
+  testWidgets(
+    'scan replacement is explicit and keeps originals, corrections and tape confirmation',
+    (t) async {
+      final api = PreferenceApi();
+      await mount(
+        t,
+        api,
+        editor: true,
+        measurementsOnly: true,
+        scanner: MeasurementScanner(),
+        initial: BridalPreferences(
+          measurements: const {
+            'Height': 168,
+            'Bust': 88,
+            'Waist': 64,
+            'Hips': 93,
+          },
+          measurementProvenance: MeasurementProvenance(
+            fields: {
+              for (final label in circumferenceLabels)
+                label: const MeasurementEvidence(
+                  source: 'user-entered',
+                  recordedAt: 1793500001000,
+                  tapeCheckedAt: 1793500000000,
+                ),
+            },
+          ),
+        ),
+      );
+      await tapControl(t, find.text('Estimate bust, waist & hips'));
+      await tapControl(t, find.text('Start measurement scan'));
+      final waist = find.byKey(const ValueKey('girth-Waist'));
+      await t.ensureVisible(waist);
+      await t.enterText(waist, '74.5');
+      await tapControl(
+        t,
+        find.text('I checked these measurements with a tape.'),
+      );
+      await tapControl(t, find.text('Use checked measurements'));
+      expect(find.text('Replace current measurements?'), findsOneWidget);
+      await tapControl(t, find.text('Keep current values'));
+      expect(api.saved, isEmpty);
+      await tapControl(t, find.text('Use checked measurements'));
+      await tapControl(t, find.text('Replace measurements'));
+      expect(
+        t
+            .widget<TextFormField>(find.byKey(const ValueKey('body-Waist')))
+            .controller!
+            .text,
+        '74.5',
+      );
+      await tapControl(t, find.byKey(const Key('save-bridal-preferences')));
+      final saved = api.saved.single;
+      expect(saved.measurements, {
+        'Height': 168,
+        'Bust': 92,
+        'Waist': 74.5,
+        'Hips': 99,
+      });
+      expect(saved.measurementProvenance.scan!.measurements, {
+        'Bust': 92,
+        'Waist': 72,
+        'Hips': 99,
+      });
+      expect(saved.measurementProvenance.scan!.heightCm, 168);
+      expect(
+        saved.measurementProvenance.fields['Waist']!.source,
+        'camera-corrected',
+      );
+      expect(
+        saved.measurementProvenance.fields['Waist']!.tapeCheckedAt,
+        isNotNull,
+      );
+      expect(saved.valid, isTrue);
+      expect(saved.useProportions, isFalse);
+    },
+  );
+
+  testWidgets(
+    'profile-save invalidation hides stale scores and reloads the authenticated profile',
+    (t) async {
+      final api = PreferenceApi();
+      await mount(
+        t,
+        api,
+        initial: const BridalPreferences(
+          measurements: {'Bust': 85, 'Waist': 70, 'Hips': 100},
+          useProportions: true,
+        ),
+      );
+      expect(
+        find.text('Optional proportion guide · Pear / triangle'),
+        findsOneWidget,
+      );
+      expect(find.text(ProportionGuide.pear.description), findsOneWidget);
+      RecommendationProfileChanges.saved('other', 2);
+      await t.pumpAndSettle();
+      expect(
+        find.text('Optional proportion guide · Pear / triangle'),
+        findsOneWidget,
+      );
+      final pending = Completer<PreferenceRecord>();
+      api.pendingLoad = pending;
+      RecommendationProfileChanges.saved('bride', 2);
+      await t.pump();
+      expect(
+        find.text('Optional proportion guide · Pear / triangle'),
+        findsNothing,
+      );
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      pending.complete(
+        const PreferenceRecord(
+          2,
+          BridalPreferences(
+            measurements: {'Bust': 90, 'Waist': 65, 'Hips': 92},
+            useProportions: true,
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+      expect(
+        find.text('Optional proportion guide · Hourglass'),
+        findsOneWidget,
+      );
+      expect(find.text(ProportionGuide.hourglass.description), findsOneWidget);
+      expect(
+        find.textContaining('Scoring inputs · Body proportions'),
+        findsOneWidget,
+      );
+      await capture(t, 'confirmed-body-type');
+      await t.scrollUntilVisible(
+        find.text('Style match 95/100'),
+        250,
+        scrollable: find
+            .byWidgetPredicate(
+              (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+            )
+            .last,
+      );
+      expect(find.text('Style match 95/100'), findsOneWidget);
+    },
+  );
+
   testWidgets(
     'sharing is separate from personal guidance and can be withdrawn without clearing measurements',
     (t) async {
@@ -274,6 +490,18 @@ void main() {
       await mount(t, api);
       expect(find.text('Let’s find what feels like you'), findsOneWidget);
       expect(find.textContaining('Style match '), findsNothing);
+      await t.scrollUntilVisible(
+        find.text('Score unavailable').first,
+        250,
+        scrollable: find
+            .byWidgetPredicate(
+              (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+            )
+            .last,
+      );
+      expect(find.text('Score unavailable'), findsWidgets);
+      await t.ensureVisible(find.byKey(const Key('edit-bridal-preferences')));
+      await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('edit-bridal-preferences')));
       await t.pumpAndSettle();
       await t.tap(find.byKey(const ValueKey('prefer-style-Mermaid')));
@@ -378,6 +606,8 @@ void main() {
         );
         await capture(t, large ? 'results-large' : 'results');
         expect(t.takeException(), isNull);
+        await t.ensureVisible(find.byKey(const Key('edit-bridal-preferences')));
+        await t.pumpAndSettle();
         await t.tap(find.byKey(const Key('edit-bridal-preferences')));
         await t.pumpAndSettle();
         await capture(t, large ? 'editor-large' : 'editor');

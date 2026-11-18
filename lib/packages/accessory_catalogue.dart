@@ -255,7 +255,10 @@ class _AccessoryBrowserState extends State<AccessoryBrowser> {
   String category = 'All', search = '', sort = 'Featured';
   void toggle(AccessoryItem item) => setState(() {
     if (selected.remove(item.id)) return;
-    if (widget.service.packageVeil) selected.clear();
+    if (widget.service.packageVeil ||
+        widget.service.serviceType == PackageServiceType.itemVeil) {
+      selected.clear();
+    }
     selected.add(item.id);
   });
   bool canSelect(AccessoryItem item) =>

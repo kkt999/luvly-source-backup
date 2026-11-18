@@ -226,6 +226,8 @@ Widget _rentalIdentity(
         ),
         const SizedBox(height: 5),
         Text(selection.name),
+        if (selection.data['packageType'] == 'Custom')
+          const Text('Custom package'),
         const SizedBox(height: 8),
         Text(
           'Plan reference · $reference',
@@ -549,6 +551,28 @@ Widget _rentalPayments(
           FilledButton(
             onPressed: s.blocked ? null : s.issueInvoice,
             child: const Text('Issue package invoice'),
+          ),
+      ],
+      if ((actions ? s.selection.data['pricingSnapshot'] : null)
+          case final Map pricing) ...[
+        const SizedBox(height: 16),
+        const Text('Selection pricing'),
+        for (final line in [
+          ...pricing['gownLines'] as List? ?? [],
+          ...pricing['lines'] as List? ?? [],
+        ])
+          if (s.selection.data['packageType'] == 'Custom' &&
+              line['amountCents'] is int)
+            _AmountRow(line['name'], packageMoney(line['amountCents'])),
+        if (pricing['discountCents'] is int && pricing['discountCents'] > 0)
+          _AmountRow(
+            'Bundle discount',
+            '− ${packageMoney(pricing['discountCents'])}',
+          ),
+        if (pricing['accessoryAdjustmentCents'] is int)
+          _AmountRow(
+            'Veil and accessory adjustments',
+            packageMoney(pricing['accessoryAdjustmentCents']),
           ),
       ],
       if (actions &&

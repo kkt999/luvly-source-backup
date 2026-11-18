@@ -9,6 +9,8 @@ import 'support.dart';
 import '../support/support_screens.dart';
 import 'chapter4.dart';
 import 'reports.dart';
+import 'analytics_screen.dart' show ManagerReport;
+import 'report_router.dart';
 import '../bookings/booking_screens.dart';
 import '../bookings/availability_screen.dart';
 import '../promotions/promotion_admin.dart';
@@ -244,16 +246,82 @@ class PortalShell extends StatefulWidget {
 }
 
 class _ShellState extends State<PortalShell> {
-  PortalPage page = PortalPage.dashboard;
+  PortalPage basePage = PortalPage.dashboard;
+  String localReportPath = '/';
+
+  String get reportPath =>
+      ReportRouter.of(context)?.currentConfiguration.path ?? localReportPath;
+
+  PortalPage get page {
+    final model = PortalScope.of(context);
+    if (model.isLive &&
+        model.canOpen(PortalPage.reports) &&
+        (reportPath == '/reports' || reportPath.startsWith('/reports/'))) {
+      return PortalPage.reports;
+    }
+    if (!model.canOpen(basePage)) return PortalPage.dashboard;
+    return basePage;
+  }
+
+  ManagerReport? get selectedReport {
+    for (final report in ManagerReport.values) {
+      if (reportPath == '/reports/${report.id}') return report;
+    }
+    return null;
+  }
+
+  void openReport(ManagerReport? report) {
+    final path = report == null ? '/reports' : '/reports/${report.id}';
+    updateReportPath(path);
+  }
+
+  void updateReportPath(String path) {
+    final router = ReportRouter.of(context);
+    if (router == null) {
+      setState(() => localReportPath = path);
+    } else {
+      router.open(context, path);
+    }
+  }
+
   void navigate(PortalPage p) {
     if (p == PortalPage.progress) p = PortalPage.rentals;
-    if (PortalScope.of(context).canOpen(p)) setState(() => page = p);
+    final model = PortalScope.of(context);
+    if (!model.canOpen(p)) return;
+    if (p == PortalPage.reports && model.isLive) {
+      openReport(null);
+      return;
+    }
+    final leavingReports = page == PortalPage.reports && model.isLive;
+    setState(() => basePage = p);
+    if (leavingReports) updateReportPath('/');
+  }
+
+  Widget reportBreadcrumb(ManagerReport report) {
+    const style = TextStyle(color: muted, fontSize: 12);
+    const separator = Text('/', style: style, semanticsLabel: ' ');
+    return Wrap(
+      spacing: 7,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        const Text('Luvly Portal', style: style),
+        separator,
+        TextButton(
+          style: TextButton.styleFrom(padding: EdgeInsets.zero),
+          onPressed: () => openReport(null),
+          child: const Text('Reports', style: TextStyle(fontSize: 12)),
+        ),
+        separator,
+        Text(report.breadcrumb, style: style),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext c) {
     final m = PortalScope.of(c);
-    if (!m.canOpen(page)) page = PortalPage.dashboard;
+    if (!m.canOpen(basePage)) basePage = PortalPage.dashboard;
+    final report = page == PortalPage.reports ? selectedReport : null;
     final narrow = MediaQuery.sizeOf(c).width < 1050;
     return Scaffold(
       drawer: narrow ? Drawer(child: _sidebar(c, true)) : null,
@@ -284,13 +352,18 @@ class _ShellState extends State<PortalShell> {
                           ),
                         ),
                       Expanded(
-                        child: Text(
-                          narrow
-                              ? m.pageLabel(page)
-                              : 'Luvly Portal   /   ${m.pageLabel(page)}',
-                          style: const TextStyle(color: muted, fontSize: 12),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        child: report != null
+                            ? reportBreadcrumb(report)
+                            : Text(
+                                narrow
+                                    ? m.pageLabel(page)
+                                    : 'Luvly Portal   /   ${m.pageLabel(page)}',
+                                style: const TextStyle(
+                                  color: muted,
+                                  fontSize: 12,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                       ),
                       if (!narrow && MediaQuery.textScalerOf(c).scale(12) < 18)
                         Text(
@@ -480,7 +553,10 @@ class _ShellState extends State<PortalShell> {
           : const SupportPage(),
     PortalPage.records => const RecordsPage(),
     PortalPage.staff => const StaffPage(),
-    PortalPage.reports => const ChapterReportsPage(),
+    PortalPage.reports => ChapterReportsPage(
+      selectedReport: selectedReport,
+      onSelectReport: openReport,
+    ),
     PortalPage.schedule =>
       PortalScope.of(context).isLive
           ? LiveAvailabilityScreen(

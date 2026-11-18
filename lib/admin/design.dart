@@ -209,18 +209,30 @@ class PageBody extends StatelessWidget {
 }
 
 class Heading extends StatelessWidget {
-  const Heading(this.title, this.subtitle, {super.key, this.action});
+  const Heading(
+    this.title,
+    this.subtitle, {
+    super.key,
+    this.action,
+    this.titleStyle,
+    this.bottomSpacing = 22,
+  });
   final String title, subtitle;
   final Widget? action;
+  final TextStyle? titleStyle;
+  final double bottomSpacing;
   @override
   Widget build(BuildContext c) => Padding(
-    padding: const EdgeInsets.only(bottom: 22),
+    padding: EdgeInsets.only(bottom: bottomSpacing),
     child: LayoutBuilder(
       builder: (c, b) {
         final copy = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title, style: Theme.of(c).textTheme.headlineMedium),
+            Text(
+              title,
+              style: titleStyle ?? Theme.of(c).textTheme.headlineMedium,
+            ),
             gap(5),
             Text(subtitle, style: const TextStyle(color: muted, fontSize: 12)),
           ],
@@ -425,12 +437,14 @@ class RecordTable extends StatelessWidget {
     this.minWidth = 850,
     this.empty = 'No matching records.',
     this.connected = false,
+    this.numericColumns = const {},
   });
   final List<String> columns;
   final List<List<Widget>> rows;
   final double minWidth;
   final String empty;
   final bool connected;
+  final Set<int> numericColumns;
   @override
   Widget build(BuildContext c) => Panel(
     padding: EdgeInsets.zero,
@@ -464,9 +478,13 @@ class RecordTable extends StatelessWidget {
                         76 * MediaQuery.textScalerOf(c).scale(13) / 13,
                     headingRowHeight:
                         46 * MediaQuery.textScalerOf(c).scale(12) / 12,
-                    columns: columns
-                        .map((s) => DataColumn(label: Text(s)))
-                        .toList(),
+                    columns: [
+                      for (final (index, name) in columns.indexed)
+                        DataColumn(
+                          label: Text(name),
+                          numeric: numericColumns.contains(index),
+                        ),
+                    ],
                     rows: rows
                         .map(
                           (r) => DataRow(

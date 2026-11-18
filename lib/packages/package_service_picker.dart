@@ -34,6 +34,7 @@ String serviceCategoryDescription(PackageServiceType type) => switch (type) {
     'Adds one calendar day to the rental period.',
   PackageServiceType.packageVeil =>
     'One veil priced through this package. Choose its inclusion or removal price below.',
+  PackageServiceType.itemVeil => 'Choose a veil at its rental price.',
   PackageServiceType.itemAccessories =>
     'Customers may add accessories at their catalogue rental prices.',
   PackageServiceType.veil =>

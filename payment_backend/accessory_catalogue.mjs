@@ -35,7 +35,7 @@ export function priceAccessories(services, input = [], version, { requireItems =
     if (requireItems || requiresAccessorySelection(service)) {
       fail(items.length > 0, 'PACKAGE_ACCESSORY_SELECTION_REQUIRED');
     }
-    if (pricing === 'package') fail(items.length === 1, 'INVALID_ACCESSORY_SELECTION');
+    if (pricing === 'package' || service.serviceType === 'item-priced-veil') fail(items.length === 1, 'INVALID_ACCESSORY_SELECTION');
     let veilUpgradeCents = 0;
     if (pricing === 'package' && service.standardVeilId !== undefined) {
       const standard = standardVeilFor(service);

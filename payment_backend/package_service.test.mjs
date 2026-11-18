@@ -722,3 +722,289 @@ test('HTTP package endpoints authenticate, reject cross-account book and preserv
     assert.equal((await req('/v1/packages/essential/delete', undefined, {revision:1})).status,401);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('catalogue price revisions and package publication preserve historical prices', async () => {
+  const {store,service} = await fixture();
+  const servicePrice = {id:'consultation',revision:0,name:'Bridal consultation',description:'',
+    active:true,method:'fixed',serviceType:'custom',priceCents:25000};
+  await assert.rejects(service.serviceCatalogue.save('bride',servicePrice),fail('MANAGER_REQUIRED'));
+  await assert.rejects(service.serviceCatalogue.save('manager',{...servicePrice,priceCents:-1}),fail('INVALID_BRIDAL_SERVICE_PRICE'));
+  const first = await service.serviceCatalogue.save('manager',servicePrice);
+  const id = 'service-priced';
+  const configuration = {id,name:'Service priced package',description:'A personal bridal consultation.',
+    active:true,includedGownCount:0,services:[{id:'consultation',name:first.name,description:'',
+      serviceType:'custom',kind:'Required',priceCents:0}],
+    pricing:{components:[{serviceId:first.id,catalogueId:first.id,revision:1,quantity:1}],
+      gownPrices:[],bundleDiscount:{kind:'percent',value:1000}}};
+  const rev0 = {draftRevision:0,publishedRevision:0};
+  await service.publication.save('manager',id,{...rev0,configuration:{...configuration,name:''}},'draft');
+  await assert.rejects(service.publication.save('manager',id,{...rev0,configuration},'draft'),fail('PACKAGE_CHANGED'));
+  assert.equal(await store.get(`servicePackages/${id}`),undefined);
+  assert.equal((await service.catalogue('manager',true,true,true,true)).packages.find(p=>p.id===id).draft,true);
+  await service.publication.save('manager',id,{draftRevision:1,publishedRevision:0,configuration},'draft');
+  const revision = {draftRevision:2,publishedRevision:0};
+  const preview = await service.publication.save('manager',id,{...revision,configuration},'preview');
+  assert.equal(preview.configuration.basePriceCents,22500);
+  const publish = {...revision,confirmed:true,reviewedSnapshot:preview.reviewId};
+  await assert.rejects(service.publication.save('staff',id,publish,'publish'),fail('MANAGER_REQUIRED'));
+  await assert.rejects(service.publication.save('manager',id,{...publish,confirmed:false},'publish'),fail('PACKAGE_PUBLISH_CONFIRMATION_REQUIRED'));
+  const published = await service.publication.save('manager',id,publish,'publish');
+  assert.equal(published.revision,1);
+  await assert.rejects(service.publication.save('manager',id,publish,'publish'),fail('PACKAGE_CHANGED'));
+  assert.ok(!(await service.catalogue('bride',true,true,true)).packages.some(p=>p.id===id));
+  assert.ok((await service.catalogue('bride',true,true,true,true)).packages.some(p=>p.id===id));
+  const quote = await service.select('bride',{requestId:'new-priced',packageId:id,revision:1,
+    removedIds:[],addonIds:[],expectedTotalCents:22500});
+  assert.equal(quote.pricingSnapshot.lines[0].unitPriceCents,25000);
+  const nextPrice = await service.serviceCatalogue.save('manager',{...servicePrice,revision:1,priceCents:30000});
+  assert.equal(nextPrice.revision,2);
+  await service.publication.save('manager',id,{draftRevision:0,publishedRevision:1,configuration},'draft');
+  assert.equal((await service.publication.get('manager',id)).published.basePriceCents,22500);
+  await assert.rejects(service.publication.save('manager',id,{draftRevision:1,publishedRevision:1,configuration},'preview'),fail('BRIDAL_SERVICE_PRICE_CHANGED'));
+  const changed = structuredClone(configuration);
+  changed.pricing.components[0].revision = 2;
+  await service.publication.save('manager',id,{draftRevision:1,publishedRevision:1,configuration:changed},'draft');
+  const phase2 = {draftRevision:2,publishedRevision:1};
+  const revised = await service.publication.save('manager',id,{...phase2,configuration:changed},'preview');
+  assert.equal(revised.configuration.basePriceCents,27000);
+  await service.publication.save('manager',id,{...phase2,confirmed:true,reviewedSnapshot:revised.reviewId},'publish');
+  assert.equal((await service.publication.version('manager',id,1)).basePriceCents,22500);
+  assert.equal((await store.get(`packageSelections/${quote.id}`)).totalCents,22500);
+  const disabled = await service.serviceCatalogue.save('manager',{...servicePrice,revision:2,active:false});
+  assert.equal(disabled.active,false);
+  assert.equal((await store.get('bridalServicePrices/consultation/revisions/1')).priceCents,25000);
+});
+
+test('approved service-based prices require real price components and a nonnegative discount', async () => {
+  const {store,service} = await gownFixture(2);
+  await service.serviceCatalogue.save('manager',{id:'service',revision:0,name:'Consultation',description:'',
+    active:true,method:'per-session',serviceType:'custom',priceCents:4000});
+  for (const [id,target,count] of [['bridal-essentials',82900,1],['signature-bridal',172900,1],['luxe-bridal',287900,2]]) {
+    const configuration = {id,name:'Bridal package',description:'Personal fitting and gown rental.',
+      active:true,includedGownCount:count,allCatalogueGowns:true,
+      services:[{id:'service',name:'Consultation',description:'',serviceType:'custom',kind:'Required',priceCents:0},
+        {id:'veil',name:'Veil Rental',description:'',serviceType:'package-veil',kind:'Optional',priceCents:8000,standardVeilId:'veil-short'}],
+      pricing:{components:[{serviceId:'service',catalogueId:'service',revision:1,quantity:1}],
+        matchApprovedPrice:true,gownPrices:[{dressId:'gown1',revision:2},...(count===2?[{dressId:'gown2',revision:2}]:[])]}};
+    const result=await service.publication.save('manager',id,{draftRevision:0,publishedRevision:0,configuration},'preview');
+    assert.equal(result.configuration.basePriceCents,target);
+    assert.equal(priceSelection(result.configuration,['veil'],[]).totalCents,target-8000);
+    assert.equal(result.pricingSnapshot.discountCents,result.pricingSnapshot.subtotalCents-target);
+    assert.equal(await store.get(`servicePackages/${id}`),undefined);
+    await assert.rejects(service.publication.save('manager',id,{draftRevision:0,publishedRevision:0,
+      configuration:{...configuration,pricing:{...configuration.pricing,components:[]}}},'preview'),fail('PACKAGE_PRICING_CONFIGURATION_REQUIRED'));
+  }
+  store.data.get('dresses/gown1').priceCents = 100;
+  const id='luxe-bridal';
+  const configuration={id,name:'Bridal package',description:'Personal fitting and gown rental.',
+    active:true,includedGownCount:1,allCatalogueGowns:true,services:[],
+    pricing:{components:[],matchApprovedPrice:true,gownPrices:[{dressId:'gown1',revision:2}]}};
+  await assert.rejects(service.publication.save('manager',id,{draftRevision:0,publishedRevision:0,configuration},'preview'),
+    fail('APPROVED_PACKAGE_SUBTOTAL_TOO_LOW'));
+});
+
+test('custom quote validates stock and recalculates standalone service, gown and veil prices', async () => {
+  const {store,service,input:existing} = await gownFixture();
+  await service.serviceCatalogue.save('manager',{id:'consultation',revision:0,name:'Bridal consultation',description:'',
+    active:true,method:'per-session',serviceType:'custom',priceCents:10000});
+  store.data.set('accessoryStock/veil-short',{quantity:1,allocations:{}});
+  const input={requestId:'custom-pick',packageId:'custom-bridal',revision:1,
+    gowns:existing.gowns,rentalPlan:availabilityPlan,removedIds:[],addonIds:['custom-veil'],
+    customServices:[{id:'consultation',revision:1,quantity:2}],accessoryCatalogueVersion:accessoryCatalogue.version,
+    accessories:[{serviceId:'custom-veil',itemId:'veil-short'}]};
+  await assert.rejects(service.select('staff',input,{previewOnly:true}),fail('BRIDE_REQUIRED'));
+  await assert.rejects(service.select('bride',{...input,accessories:[]},{previewOnly:true}),
+    fail('PACKAGE_ACCESSORY_SELECTION_REQUIRED'));
+  const result=await service.select('bride',input,{previewOnly:true});
+  assert.equal(result.totalCents,gown().priceCents+20000+8000);
+  assert.equal(result.pricingSnapshot.discountCents,0);
+  assert.equal((await store.list('packageSelections')).length,0);
+  await assert.rejects(service.select('bride',{...input,quoteId:result.quoteId,expectedTotalCents:1}),fail('PACKAGE_CHANGED'));
+  await assert.rejects(service.select('other',{...input,quoteId:result.quoteId,expectedTotalCents:result.totalCents}),fail('PACKAGE_CHANGED'));
+  const order=await service.select('bride',{...input,quoteId:result.quoteId,expectedTotalCents:result.totalCents});
+  assert.equal(order.packageType,'Custom');
+  assert.equal(order.invoiceId,null);
+  assert.equal(order.rentalId,undefined);
+  assert.equal((await store.get(`rentalVariants/${variantId('gown1','M')}`)).allocations[order.id],undefined);
+  assert.equal((await service.select('bride',{...input,quoteId:result.quoteId,expectedTotalCents:result.totalCents})).id,order.id);
+  const revised={...input,requestId:'change-custom',revision:0,packageRevision:1,planRevision:1,
+    previewOnly:true,addonIds:[],accessories:[],customServices:[]};
+  const preview=await service.revise('bride',order.id,revised);
+  assert.equal(preview.totalCents,gown().priceCents);
+  await assert.rejects(service.revise('other',order.id,revised),fail('SELECTION_ACCESS_DENIED'));
+  await service.revise('bride',order.id,{...revised,previewOnly:false,expectedTotalCents:preview.totalCents});
+  assert.equal((await store.get(`packageSelections/${order.id}`)).totalCents,gown().priceCents);
+  const booked = await service.book('bride',order.id,booking());
+  const saved = await store.get(`packageSelections/${order.id}`);
+  assert.deepEqual(saved.appointmentIds,[booked.appointmentId]);
+  assert.equal(saved.totalCents,gown().priceCents);
+  await assert.rejects(service.invoice('manager',order.id,{appointmentId:booked.appointmentId}),
+    fail('PACKAGE_RENTAL_CONFIRMATION_REQUIRED'));
+});
+
+test('a standard gown allowance prices a count without selecting gown models', async () => {
+  const {service, store} = await gownFixture(2);
+  const id = 'count-based-package';
+  const version = {draftRevision:0,publishedRevision:0};
+  const price = {id:'consultation',revision:0,name:'Bridal consultation',description:'',
+    active:true,method:'fixed',serviceType:'custom',priceCents:20000};
+  await service.serviceCatalogue.save('manager',price);
+  const config = {id, name:'Count based package',description:'Two catalogue gowns and a consultation.',
+    active:true,includedGownCount:2,allCatalogueGowns:true,
+    services:[{id:'consultation',name:price.name,description:'',kind:'Required',priceCents:0,serviceType:'custom'}],
+    pricing:{gownPrices:[],useStandardGownAllowance:true,
+      components:[{serviceId:price.id,catalogueId:price.id,revision:1,quantity:1}],
+      bundleDiscount:{kind:'fixed',value:5000}}};
+  await assert.rejects(service.publication.save('manager',id,{...version,configuration:config},'preview'),
+    fail('PACKAGE_GOWN_ALLOWANCE_REQUIRED'));
+  const allowance={...price,id:'standard-gown-allowance',name:'Standard gown allowance',
+    method:'per-gown',priceCents:50000,customEligible:false};
+  await assert.rejects(service.serviceCatalogue.save('staff',allowance),fail('MANAGER_REQUIRED'));
+  await assert.rejects(service.serviceCatalogue.save('manager',{...allowance,customEligible:true}),
+    fail('INVALID_BRIDAL_SERVICE_PRICE'));
+  await service.serviceCatalogue.save('manager',allowance);
+  assert.deepEqual([...new Set((await service.customOptions('bride')).services.map(s=>s.id))],[price.id]);
+  await service.publication.save('manager',id,{...version,configuration:config},'draft');
+  const savedVersion={...version,draftRevision:1};
+  const preview=await service.publication.save('manager',id,{...savedVersion,configuration:config},'preview');
+  assert.equal(preview.pricingSnapshot.subtotalCents,120000);
+  assert.equal(preview.configuration.basePriceCents,115000);
+  assert.equal(preview.pricingSnapshot.gownLines[0].quantity,2);
+  const publication={...savedVersion,confirmed:true,reviewedSnapshot:preview.reviewId};
+  await service.serviceCatalogue.save('manager',{...allowance,revision:1,priceCents:51000});
+  await assert.rejects(service.publication.save('manager',id,publication,'publish'),fail('PACKAGE_REVIEW_CHANGED'));
+  assert.equal(await store.get(`servicePackages/${id}`),undefined);
+});
+
+test('catalogue exposes active custom services and requires explicit safe standalone approval', async () => {
+  const {service} = await fixture();
+  const base = {revision:0,description:'',method:'fixed',serviceType:'custom',priceCents:10000,active:true};
+  await service.serviceCatalogue.save('manager',{...base,id:'consultation',name:'Consultation',standaloneEligible:true});
+  await service.serviceCatalogue.save('manager',{...base,id:'unflagged',name:'Existing service'});
+  await service.serviceCatalogue.save('manager',{...base,id:'inactive',name:'Inactive',active:false});
+  await service.serviceCatalogue.save('manager',{...base,id:'manager-only',name:'Manager only',customEligible:false});
+  await assert.rejects(service.serviceCatalogue.save('manager',{...base,id:'extra-fitting',
+    name:'Additional fitting',serviceType:'extra-fitting',standaloneEligible:true}),fail('INVALID_STANDALONE_ELIGIBILITY'));
+  await assert.rejects(service.serviceCatalogue.save('manager',{...base,id:'offered-only',
+    name:'Not offered',customEligible:false,standaloneEligible:true}),fail('INVALID_STANDALONE_ELIGIBILITY'));
+  const options=(await service.customOptions('bride')).services;
+  assert.equal(options.find(row=>row.id==='consultation').standaloneEligible,true);
+  assert.equal(options.find(row=>row.id==='unflagged').standaloneEligible,false);
+  assert.equal(options.some(row=>['inactive','manager-only'].includes(row.id)),false);
+});
+
+test('Manager can enable standalone makeup without changing its catalogue price', async t => {
+  const {service, payments, store} = await fixture();
+  const route = '/v1/bridal-service-prices';
+  const server = createServer(createHandler({
+    service: payments, packages: service, verifyToken: async uid => ({uid}),
+  }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const send = (path, uid, body) => fetch(origin + path, {
+    headers: {Authorization: 'Bearer ' + uid, 'Content-Type': 'application/json'},
+    ...(body && {method: 'POST', body: JSON.stringify(body)}),
+  });
+
+  const row = {
+    id: 'wedding-makeup', revision: 1, name: 'Bridal Makeup & Hairstyling',
+    description: '', method: 'fixed', serviceType: 'makeup-hair',
+    priceCents: 50000, active: true, customEligible: true,
+  };
+  store.data.set('bridalServicePrices/' + row.id, row);
+
+  const saved = await send(route, 'manager', {...row, standaloneEligible: true});
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).standaloneEligible, true);
+
+  const {services} = await (await send(route, 'manager')).json();
+  const persisted = services.find(service => service.id === row.id);
+  assert.equal(persisted.standaloneEligible, true);
+  assert.equal(persisted.priceCents, row.priceCents);
+  assert.equal(persisted.revision, 2);
+
+  const options = await (await send('/v1/custom-package-options', 'bride')).json();
+  assert.equal(options.services.find(service => service.id === row.id).standaloneEligible, true);
+});
+
+test('service-only consultation uses event date, proper appointment and existing package invoice without a fitting fee', async () => {
+  const {service,store,payments}=await fixture();
+  service.bookings.feePolicy=true;
+  await service.serviceCatalogue.save('manager',{id:'consultation',revision:0,name:'Bridal consultation',
+    description:'',active:true,customEligible:true,standaloneEligible:true,method:'fixed',
+    serviceType:'custom',priceCents:10000});
+  const input={requestId:'service-only',packageId:'custom-bridal',revision:1,removedIds:[],addonIds:[],
+    gowns:[],accessories:[],customServices:[{id:'consultation',revision:1,quantity:1}],
+    rentalPlan:{eventDate:availabilityPlan.eventDate}};
+  await assert.rejects(service.select('bride',{...input,customServices:[]},{previewOnly:true}),fail('INVALID_CUSTOM_PACKAGE'));
+  await assert.rejects(service.select('bride',{...input,rentalPlan:availabilityPlan},{previewOnly:true}),fail('INVALID_CUSTOM_EVENT_DATE'));
+  await assert.rejects(service.select('bride',{...input,addonIds:['custom-veil']},{previewOnly:true}),fail('CUSTOM_SERVICE_REQUIRES_GOWN'));
+  const quote=await service.select('bride',input,{previewOnly:true});
+  assert.equal(quote.totalCents,10000);
+  assert.deepEqual(quote.pricingSnapshot.gownLines,[]);
+  const order=await service.select('bride',{...input,quoteId:quote.quoteId,expectedTotalCents:quote.totalCents});
+  assert.equal(order.status,'Quoted');
+  assert.equal(order.serviceOnly,true);
+  assert.deepEqual(order.appointmentIds,[]);
+  await assert.rejects(service.book('bride',order.id,{...booking(),type:'Dress Trial',feePolicyVersion:1}),fail('SERVICE_APPOINTMENT_TEAM_REVIEW'));
+  const booked=await service.book('bride',order.id,{...booking(),feePolicyVersion:1});
+  assert.equal(booked.status,'Confirmed');
+  assert.equal(booked.invoiceId,null);
+  const invoice=await service.invoice('manager',order.id,{appointmentId:booked.appointmentId});
+  assert.equal(invoice.amountCents,10000);
+  assert.equal(invoice.purpose,'PackagePayment');
+  const checkout=await payments.checkout('bride',invoice.id);
+  assert.equal(checkout.amountCents,10000);
+  assert.equal((await payments.refresh('bride',invoice.id)).state,'SandboxPaid');
+  assert.equal((await store.list('rentals')).length,0);
+  assert.equal((await store.list('sandboxInvoices')).length,1);
+});
+
+test('wedding-day makeup and multi-service quotes stay pending team scheduling and dependent services require gowns', async () => {
+  const {service}=await gownFixture();
+  const base={revision:0,description:'',active:true,method:'fixed',priceCents:50000};
+  await service.serviceCatalogue.save('manager',{...base,id:'makeup-hair',name:'Wedding makeup',
+    serviceType:'makeup-hair',standaloneEligible:true});
+  await service.serviceCatalogue.save('manager',{...base,id:'extra-fitting',name:'Additional fitting',
+    serviceType:'extra-fitting',method:'per-session',priceCents:8000});
+  const input={requestId:'makeup-only',packageId:'custom-bridal',revision:1,removedIds:[],addonIds:[],
+    gowns:[],accessories:[],customServices:[{id:'makeup-hair',revision:1,quantity:1}],
+    rentalPlan:{eventDate:availabilityPlan.eventDate}};
+  await assert.rejects(service.select('bride',{...input,customServices:[{id:'extra-fitting',revision:1,quantity:1}]},{previewOnly:true}),
+    fail('CUSTOM_SERVICE_REQUIRES_GOWN'));
+  const quoted=await service.select('bride',input,{previewOnly:true});
+  const saved=await service.select('bride',{...input,quoteId:quoted.quoteId,expectedTotalCents:50000});
+  assert.equal(saved.serviceAppointmentType,null);
+  await assert.rejects(service.book('bride',saved.id,booking()),fail('SERVICE_APPOINTMENT_TEAM_REVIEW'));
+  const revise={...input,requestId:'add-gown',revision:0,packageRevision:1,planRevision:1,previewOnly:true,
+    gowns:[{dressId:'gown1',size:'M',revision:2}],rentalPlan:availabilityPlan};
+  const combined=await service.revise('bride',saved.id,revise);
+  assert.ok(combined.totalCents>50000);
+  await service.revise('bride',saved.id,{...revise,previewOnly:false,expectedTotalCents:combined.totalCents});
+  const selection=(await service.selections('bride')).selections.find(row=>row.id===saved.id);
+  assert.equal(selection.serviceOnly,false);
+  assert.deepEqual(selection.customServices,input.customServices);
+});
+
+test('a service-only makeup trial requires staff assigned to makeup before booking', async () => {
+  const {service,store}=await fixture();
+  service.bookings.workforce={};
+  service.bookings.feePolicy=true;
+  await service.serviceCatalogue.save('manager',{id:'makeup-trial',revision:0,name:'Makeup trial',
+    description:'',active:true,customEligible:true,standaloneEligible:true,method:'fixed',
+    serviceType:'makeup-trial',priceCents:20000});
+  const input={requestId:'trial-only',packageId:'custom-bridal',revision:1,removedIds:[],addonIds:[],
+    gowns:[],accessories:[],customServices:[{id:'makeup-trial',revision:1,quantity:1}],
+    rentalPlan:{eventDate:availabilityPlan.eventDate}};
+  const quote=await service.select('bride',input,{previewOnly:true});
+  const plan=await service.select('bride',{...input,quoteId:quote.quoteId,expectedTotalCents:20000});
+  assert.equal(plan.serviceAppointmentType,'Makeup Trial');
+  const time={...booking(),type:'Makeup Trial',feePolicyVersion:1};
+  await assert.rejects(service.book('bride',plan.id,time),fail('NO_STAFF_AVAILABLE'));
+  store.data.set('staffScheduling/staff',{jobRole:'MakeupArtist',serviceTypes:['Bridal Makeup']});
+  const visit=await service.book('bride',plan.id,time);
+  assert.equal(visit.status,'Confirmed');
+  assert.equal(visit.invoiceId,null);
+  assert.equal((await store.list('rentals')).length,0);
+});

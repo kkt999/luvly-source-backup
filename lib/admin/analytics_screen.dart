@@ -13,6 +13,39 @@ import 'people.dart' show AccessDenied;
 
 const _sage = Color(0xFF46665B), _gold = Color(0xFFAE7835);
 
+enum ManagerReport {
+  packages(
+    'packages',
+    'Package Popularity Report',
+    'Compare recorded selections and paid bookings by package.',
+    Icons.workspace_premium_outlined,
+  ),
+  conversion(
+    'conversion',
+    'Appointment Conversion Report',
+    'Track completed fittings that led to a verified package payment.',
+    Icons.event_available_outlined,
+  ),
+  collections(
+    'collections',
+    'Revenue Summary Report',
+    'Review verified service collections and refundable security.',
+    Icons.bar_chart_outlined,
+  ),
+  bodyTypes(
+    'body-types',
+    'Body Type Distribution Report',
+    'View counts and percentages for shared body profiles.',
+    Icons.pie_chart_outline,
+  );
+
+  const ManagerReport(this.id, this.title, this.description, this.icon);
+
+  final String id, title, description;
+  String get breadcrumb => title.substring(0, title.length - ' Report'.length);
+  final IconData icon;
+}
+
 class BusinessAnalyticsPage extends StatefulWidget {
   const BusinessAnalyticsPage({
     super.key,
@@ -21,12 +54,16 @@ class BusinessAnalyticsPage extends StatefulWidget {
     this.onNavigate,
     this.exportCsv,
     this.today,
+    this.selectedReport,
+    this.onSelectReport,
   });
   final bool dashboard;
   final AnalyticsApi? api;
   final ValueChanged<PortalPage>? onNavigate;
   final bool Function(String, String)? exportCsv;
   final DateTime? today;
+  final ManagerReport? selectedReport;
+  final ValueChanged<ManagerReport>? onSelectReport;
   @override
   State<BusinessAnalyticsPage> createState() => _BusinessAnalyticsState();
 }
@@ -35,7 +72,7 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
     with WidgetsBindingObserver {
   AnalyticsApi? api;
   String? actorKey;
-  bool ownsApi = false, dirty = false;
+  bool ownsApi = false, dirty = false, methodologyOpen = false;
   Future<AnalyticsSnapshot>? future;
   final sourceRevision = ValueNotifier<int>(0);
   StreamSubscription<String>? liveSubscription;
@@ -48,7 +85,10 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
       widget.today ?? AnalyticsScope.todayOf(context) ?? analyticsToday();
   late DateTime from = today.subtract(const Duration(days: 29)), to = today;
   late DateTime appliedFrom = from, appliedTo = to;
-  String preset = 'Last 30 days', reportId = 'packages';
+  String preset = 'Last 30 days';
+  ManagerReport? get selectedReport => widget.selectedReport;
+  String? get reportId => selectedReport?.id;
+  bool get canLoad => widget.dashboard || (selectedReport != null && manager);
   bool get manager => PortalScope.of(context).isManager;
   @override
   void didChangeDependencies() {
@@ -82,7 +122,7 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
   }
 
   void load({bool applyDraft = true}) {
-    if (!widget.dashboard && !manager) return;
+    if (!canLoad) return;
     final snapshotOnly = !widget.dashboard && reportId == 'body-types';
     if (!applyDraft &&
         manager &&
@@ -139,7 +179,13 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
     visible = state == AppLifecycleState.resumed;
     if (!visible) {
       stopLive();
-      if (mounted) setState(() => liveStatus = 'Updates paused');
+      if (mounted && api is LiveAnalyticsApi) {
+        setState(
+          () => liveStatus = widget.dashboard
+              ? 'Updates paused'
+              : 'Auto-refresh paused',
+        );
+      }
     } else if (mounted) {
       setState(() => load(applyDraft: false));
       connectLive();
@@ -178,21 +224,25 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
   }
 
   void connectLive() {
-    if (api is! LiveAnalyticsApi ||
-        (!widget.dashboard && !manager) ||
-        !visible) {
+    if (api is! LiveAnalyticsApi || !canLoad || !visible) {
       return;
     }
     stopLive();
     final epoch = liveEpoch;
-    liveStatus = 'Connecting live updates';
+    liveStatus = widget.dashboard
+        ? 'Connecting live updates'
+        : 'Connecting auto-refresh';
     void disconnected() {
       if (!mounted || epoch != liveEpoch || !visible) return;
       liveEpoch++;
       liveSubscription?.cancel();
       liveSubscription = null;
       clockRefresh?.cancel();
-      setState(() => liveStatus = 'Live disconnected · reconnecting');
+      setState(
+        () => liveStatus = widget.dashboard
+            ? 'Live disconnected · reconnecting'
+            : 'Auto-refresh disconnected · reconnecting',
+      );
       reconnect = Timer(Duration(seconds: retrySeconds), () {
         if (mounted && visible) setState(connectLive);
       });
@@ -218,7 +268,9 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
         } else if (event == 'access-denied') {
           stopLive();
           setState(() {
-            liveStatus = 'Live access unavailable';
+            liveStatus = widget.dashboard
+                ? 'Live access unavailable'
+                : 'Auto-refresh unavailable';
             future = Future<AnalyticsSnapshot>.error(
               const PaymentFailure(
                 'Your access changed. Please sign in again.',
@@ -306,20 +358,75 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
   }
 
   @override
+  void didUpdateWidget(BusinessAnalyticsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedReport == selectedReport) return;
+    stopLive();
+    requestEpoch++;
+    future = null;
+    loading = false;
+    methodologyOpen = false;
+    liveStatus = 'Manual updates';
+    load(applyDraft: false);
+    connectLive();
+  }
+
+  @override
   Widget build(BuildContext c) {
     final model = PortalScope.of(c);
     if (!widget.dashboard && !model.isManager) return const AccessDenied();
+    final selected = selectedReport;
+    if (!widget.dashboard && selected == null) {
+      return PageBody(
+        key: const ValueKey('report-picker'),
+        children: [
+          const Heading(
+            'Analytics Dashboard',
+            'Choose a business report to view.',
+          ),
+          ResponsiveGrid(
+            minWidth: 340,
+            children: [
+              for (final report in ManagerReport.values)
+                Card(
+                  margin: EdgeInsets.zero,
+                  elevation: 0,
+                  color: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    side: const BorderSide(color: border),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 12,
+                    ),
+                    leading: Icon(report.icon, color: rose),
+                    title: Text(report.title),
+                    subtitle: Text(report.description),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => widget.onSelectReport?.call(report),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      );
+    }
     return PageBody(
+      key: ValueKey(selected?.id ?? 'dashboard'),
       children: [
         Heading(
           widget.dashboard
               ? 'Welcome back, ${model.current!.name}'
-              : 'Analytics Dashboard',
+              : selected!.title,
           widget.dashboard
               ? 'A clear view of your boutique, with the next actions in reach.'
-              : 'Business insights from verified project records.',
+              : selected!.description,
+          bottomSpacing: selected == null ? 22 : 12,
           action: OutlinedButton.icon(
-            onPressed: () => setState(load),
+            onPressed: () => setState(() => load(applyDraft: widget.dashboard)),
             icon: const Icon(Icons.refresh, size: 17),
             label: const Text('Refresh data'),
           ),
@@ -329,17 +436,24 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
           runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            Icon(
-              liveStatus == 'Live updates connected'
-                  ? Icons.sensors
-                  : Icons.sync_disabled,
-              size: 16,
-              color: liveStatus == 'Live updates connected' ? _sage : muted,
-            ),
-            Text(
-              liveStatus,
-              style: const TextStyle(color: muted, fontSize: 12),
-            ),
+            if (widget.dashboard || api is LiveAnalyticsApi) ...[
+              Icon(
+                liveStatus == 'Live updates connected'
+                    ? Icons.sensors
+                    : Icons.sync_disabled,
+                size: 16,
+                color: liveStatus == 'Live updates connected' ? _sage : muted,
+              ),
+              Text(
+                liveStatus == 'Live updates connected' && !widget.dashboard
+                    ? 'Auto-refresh active'
+                    : liveStatus,
+                style: const TextStyle(color: muted, fontSize: 12),
+                semanticsLabel: liveStatus == 'Auto-refresh paused'
+                    ? 'Auto-refresh paused while this page is inactive'
+                    : null,
+              ),
+            ],
             if (loading)
               const Text(
                 'Checking latest data…',
@@ -347,9 +461,12 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
               ),
           ],
         ),
-        gap(16),
+        gap(selected == null ? 16 : 10),
         if (manager && (widget.dashboard || reportId != 'body-types')) ...[
           Panel(
+            padding: selected == null
+                ? const EdgeInsets.all(20)
+                : const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -457,9 +574,11 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Could not load dashboard data.',
-                      style: TextStyle(fontWeight: FontWeight.w600),
+                    Text(
+                      widget.dashboard
+                          ? 'Could not load dashboard data.'
+                          : 'Could not load this report.',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                     gap(8),
                     Text(
@@ -469,7 +588,8 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                     ),
                     gap(14),
                     FilledButton.icon(
-                      onPressed: () => setState(load),
+                      onPressed: () =>
+                          setState(() => load(applyDraft: widget.dashboard)),
                       icon: const Icon(Icons.refresh),
                       label: const Text('Retry'),
                     ),
@@ -498,13 +618,13 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     if (manager) _tag('Test transactions', rose, blush),
-                    if (manager)
+                    if (manager && reportId != 'body-types')
                       Text(
                         'Applied period: ${data.data['range']['from']} to ${data.data['range']['to']}',
                         style: const TextStyle(color: muted, fontSize: 11),
                       ),
                     Text(
-                      'Updated ${analyticsDate(generated)} · ${generated.hour.toString().padLeft(2, '0')}:${generated.minute.toString().padLeft(2, '0')} MYT',
+                      '${widget.dashboard ? 'Updated' : 'Last updated'} ${analyticsDate(generated)} · ${generated.hour.toString().padLeft(2, '0')}:${generated.minute.toString().padLeft(2, '0')} MYT',
                       style: const TextStyle(color: muted, fontSize: 11),
                     ),
                     if (!manager)
@@ -542,31 +662,6 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                   ],
                   _Operations(data: data, onNavigate: widget.onNavigate),
                 ] else ...[
-                  _BusinessMetrics(
-                    data: data,
-                    onDetails: (kind) => showDetails(kind, data),
-                  ),
-                  gap(24),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final item in const [
-                        ('packages', 'Package demand'),
-                        ('conversion', 'Fitting conversion'),
-                        ('collections', 'Collections'),
-                        ('body-types', 'Body profiles'),
-                      ])
-                        ChoiceChip(
-                          label: Text(item.$2),
-                          selected: reportId == item.$1,
-                          onSelected: (_) => setState(() {
-                            reportId = item.$1;
-                          }),
-                        ),
-                    ],
-                  ),
-                  gap(22),
                   if (reportId == 'collections') _CollectionsChart(data: data),
                   if (reportId == 'packages') _PackageChart(data: data),
                   if (reportId == 'conversion') _ConversionChart(data: data),
@@ -576,8 +671,10 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                     (r) => r.id == reportId,
                   )) ...[
                     Heading(
-                      report.title,
+                      'Report Results',
                       report.summary,
+                      titleStyle: Theme.of(c).textTheme.titleLarge,
+                      bottomSpacing: 6,
                       action: FilledButton.icon(
                         key: const Key('export-report-csv'),
                         onPressed: dirty && report.id != 'body-types'
@@ -602,27 +699,66 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                         label: const Text('Export full CSV'),
                       ),
                     ),
-                    Panel(
-                      child: ExpansionTile(
-                        tilePadding: EdgeInsets.zero,
-                        childrenPadding: const EdgeInsets.only(bottom: 14),
-                        title: const Text(
-                          'How this report is calculated',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                        children: [
-                          Text(
-                            report.basis,
-                            style: const TextStyle(
-                              color: muted,
-                              fontSize: 12,
-                              height: 1.6,
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        MergeSemantics(
+                          child: Semantics(
+                            expanded: methodologyOpen,
+                            hint: methodologyOpen
+                                ? 'Collapse calculation details'
+                                : 'Expand calculation details',
+                            child: TextButton.icon(
+                              onPressed: () => setState(
+                                () => methodologyOpen = !methodologyOpen,
+                              ),
+                              icon: Icon(
+                                methodologyOpen
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                                size: 17,
+                              ),
+                              label: const Text(
+                                'How this report is calculated',
+                              ),
                             ),
                           ),
+                        ),
+                        if (reportId == 'packages')
+                          TextButton(
+                            onPressed: () => showDetails('selections', data),
+                            child: const Text('View package selection records'),
+                          ),
+                        if (reportId == 'conversion')
+                          TextButton(
+                            onPressed: () => showDetails('conversion', data),
+                            child: const Text('View fitting records'),
+                          ),
+                        if (reportId == 'collections') ...[
+                          TextButton(
+                            onPressed: () => showDetails('service', data),
+                            child: const Text('View service receipts'),
+                          ),
+                          TextButton(
+                            onPressed: () => showDetails('security', data),
+                            child: const Text('View security receipts'),
+                          ),
                         ],
-                      ),
+                      ],
                     ),
-                    gap(18),
+                    if (methodologyOpen)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+                        child: Text(
+                          report.basis,
+                          style: const TextStyle(
+                            color: muted,
+                            fontSize: 12,
+                            height: 1.6,
+                          ),
+                        ),
+                      ),
+                    gap(8),
                     _ReportTable(
                       key: ValueKey(
                         '${reportId}_${data.data['range']['from']}_${data.data['range']['to']}',
@@ -631,7 +767,8 @@ class _BusinessAnalyticsState extends State<BusinessAnalyticsPage>
                     ),
                   ],
                 ],
-                if (manager) ...[
+                if (manager &&
+                    (widget.dashboard || reportId == 'collections')) ...[
                   gap(20),
                   const Text(
                     'Collections show verified test payments. Refundable security and refund records are tracked separately. Dates use Malaysia time.',
@@ -1348,9 +1485,15 @@ class _ReportTableState extends State<_ReportTable> {
             page = 0;
           }),
         ),
-        gap(14),
+        gap(8),
         RecordTable(
           columns: widget.report.headers,
+          numericColumns: switch (widget.report.id) {
+            'packages' => const {1, 2, 3},
+            'collections' => const {3},
+            'body-types' => const {1, 2},
+            _ => const {},
+          },
           connected: true,
           minWidth: 650,
           rows: rows

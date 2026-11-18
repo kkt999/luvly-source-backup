@@ -467,12 +467,14 @@ class BookingRequestForm extends StatefulWidget {
     this.packageName = '',
     this.submitRequest,
     this.latestAppointmentDay,
+    this.packageAppointmentType,
     this.fittingIncluded = false,
     this.onSubmitted,
   });
   final String uid, name, phone, dressId, dressName;
   final String packageName;
   final DateTime? latestAppointmentDay;
+  final String? packageAppointmentType;
   final bool fittingIncluded;
   final VoidCallback? onSubmitted;
   final Future<BookingOutcome?> Function(
@@ -552,9 +554,10 @@ class _BookingRequestFormState extends State<BookingRequestForm> {
 
   DateTime day = malaysiaNow().add(const Duration(days: 1));
   int? hour;
-  String type = appointmentTypes.first;
-  List<String> get availableTypes =>
-      widget.submitRequest != null || widget.dressId.isNotEmpty
+  late String type = widget.packageAppointmentType ?? appointmentTypes.first;
+  List<String> get availableTypes => widget.packageAppointmentType != null
+      ? [widget.packageAppointmentType!]
+      : widget.submitRequest != null || widget.dressId.isNotEmpty
       ? gownAppointmentTypes
       : appointmentTypes;
   bool busy = false, termsAccepted = false;

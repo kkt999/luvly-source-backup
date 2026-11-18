@@ -121,7 +121,13 @@ ReportData calculateReport(
 }
 
 class ChapterReportsPage extends StatefulWidget {
-  const ChapterReportsPage({super.key});
+  const ChapterReportsPage({
+    super.key,
+    this.selectedReport,
+    this.onSelectReport,
+  });
+  final ManagerReport? selectedReport;
+  final ValueChanged<ManagerReport>? onSelectReport;
   @override
   State<ChapterReportsPage> createState() => _ReportsState();
 }
@@ -134,7 +140,12 @@ class _ReportsState extends State<ChapterReportsPage> {
   Widget build(BuildContext c) {
     final m = PortalScope.of(c);
     if (!m.isManager) return const AccessDenied();
-    if (m.isLive) return const BusinessAnalyticsPage();
+    if (m.isLive) {
+      return BusinessAnalyticsPage(
+        selectedReport: widget.selectedReport,
+        onSelectReport: widget.onSelectReport,
+      );
+    }
     from ??= m.today.subtract(const Duration(days: 29));
     to ??= m.today;
     if (selected == null) {

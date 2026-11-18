@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 
-import '../admin/design.dart'
-    show Pill, blush, border, canvas, ink, muted, rose;
+import '../admin/design.dart' show Pill, border, canvas, ink, muted, rose;
 import '../catalogue/catalogue_repository.dart' show validateDressText;
 import '../payments/payment_api.dart';
 import 'accessory_catalogue.dart';
 import 'package_api.dart';
+import 'package_editor_section.dart';
 import 'package_service_picker.dart';
 
 const _maximumPrice = 100000000;
@@ -579,7 +579,7 @@ class _PackageEditorState extends State<PackageEditor> {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Section(
+        PackageEditorSection(
           key: details,
           title: 'Package details',
           icon: Icons.description_outlined,
@@ -642,7 +642,7 @@ class _PackageEditorState extends State<PackageEditor> {
           ],
         ),
         const SizedBox(height: 16),
-        _Section(
+        PackageEditorSection(
           key: gowns,
           title: 'Gown rentals',
           icon: Icons.checkroom_outlined,
@@ -650,7 +650,7 @@ class _PackageEditorState extends State<PackageEditor> {
           children: [gownQuantity()],
         ),
         const SizedBox(height: 16),
-        _Section(
+        PackageEditorSection(
           key: serviceSection,
           title: 'Services & add-ons',
           icon: Icons.list_alt_outlined,
@@ -983,7 +983,7 @@ class _PackageEditorState extends State<PackageEditor> {
 
   Widget customerPreview(BuildContext context) {
     final p = preview;
-    return _Section(
+    return PackageEditorSection(
       title: p.name,
       subtitle: p.description,
       icon: Icons.visibility_outlined,
@@ -1054,7 +1054,7 @@ class _PackageEditorState extends State<PackageEditor> {
     final p = preview;
     final issue = reviewing ? publishIssue : null;
     final total = p.total(removed, addons);
-    return _Section(
+    return PackageEditorSection(
       title: reviewing ? 'Price preview' : 'Package summary',
       icon: Icons.receipt_long_outlined,
       children: [
@@ -1308,58 +1308,6 @@ class _AccessoryCatalogueDialogState extends State<_AccessoryCatalogueDialog> {
         child: const Text('Done'),
       ),
     ],
-  );
-}
-
-class _Section extends StatelessWidget {
-  const _Section({
-    super.key,
-    required this.title,
-    required this.icon,
-    required this.children,
-    this.subtitle,
-  });
-  final String title;
-  final String? subtitle;
-  final IconData icon;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(18),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: border),
-      borderRadius: BorderRadius.circular(12),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: blush,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(icon, size: 18, color: rose),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(title, style: Theme.of(context).textTheme.titleLarge),
-            ),
-          ],
-        ),
-        if (subtitle case final text?) ...[
-          const SizedBox(height: 8),
-          Text(text, style: const TextStyle(color: muted)),
-        ],
-        const SizedBox(height: 16),
-        ...children,
-      ],
-    ),
   );
 }
 

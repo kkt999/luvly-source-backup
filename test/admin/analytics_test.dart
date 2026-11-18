@@ -190,7 +190,7 @@ class FakeAnalytics implements AnalyticsApi {
   void close() {}
 }
 
-Future<void> render(
+Future<ValueNotifier<ManagerReport?>> render(
   WidgetTester t, {
   required FakeAnalytics api,
   bool manager = true,
@@ -208,6 +208,8 @@ Future<void> render(
     ),
   );
   addTearDown(model.dispose);
+  final selection = ValueNotifier<ManagerReport?>(null);
+  addTearDown(selection.dispose);
   await t.pumpWidget(
     PortalScope(
       model: model,
@@ -219,22 +221,36 @@ Future<void> render(
           child: w!,
         ),
         home: Scaffold(
-          body: BusinessAnalyticsPage(
-            api: api,
-            dashboard: dashboard,
-            onNavigate: navigate,
-            exportCsv: export,
-            today: fixedToday,
+          body: ValueListenableBuilder(
+            valueListenable: selection,
+            builder: (context, report, child) => BusinessAnalyticsPage(
+              key: ValueKey(dashboard),
+              api: api,
+              dashboard: dashboard,
+              onNavigate: navigate,
+              exportCsv: export,
+              today: fixedToday,
+              selectedReport: report,
+              onSelectReport: (report) => selection.value = report,
+            ),
           ),
         ),
       ),
     ),
   );
   await t.pumpAndSettle();
+  return selection;
 }
 
 Future<void> reveal(WidgetTester t, Finder finder) async {
   await t.ensureVisible(finder);
+  await t.pumpAndSettle();
+}
+
+Future<void> tapReportControl(WidgetTester t, String label) async {
+  final control = find.text(label);
+  await reveal(t, control);
+  await t.tap(control);
   await t.pumpAndSettle();
 }
 
@@ -390,7 +406,7 @@ void main() {
       viewport(t, const Size(1280, 1600));
       final api = FakeAnalytics();
       String? exported;
-      await render(
+      final selection = await render(
         t,
         api: api,
         export: (name, csv) {
@@ -398,10 +414,33 @@ void main() {
           return true;
         },
       );
-      expect(find.text('Package Popularity Report'), findsOneWidget);
-      await t.tap(find.text('Collections'));
-      await t.pumpAndSettle();
+      expect(
+        find.widgetWithText(ListTile, 'Package Popularity Report'),
+        findsOneWidget,
+      );
+      expect(find.byType(ListTile), findsNWidgets(4));
+      expect(api.reportCalls, 0);
+      expect(find.text('Service collections'), findsNothing);
+      expect(find.text('Export full CSV'), findsNothing);
+      await tapReportControl(t, 'Revenue Summary Report');
+      expect(
+        find.widgetWithText(ListTile, 'Package Popularity Report'),
+        findsNothing,
+      );
       expect(find.text('Revenue Summary Report'), findsOneWidget);
+      expect(find.text('All reports'), findsNothing);
+      final methodology = find.text('How this report is calculated');
+      final basis = find.text(
+        'Sandbox verified paid dates only; service collections exclude refundable security. Not accounting profit.',
+      );
+      expect(basis, findsNothing);
+      await reveal(t, methodology);
+      await t.tap(methodology);
+      await t.pumpAndSettle();
+      expect(basis, findsOneWidget);
+      await t.tap(methodology);
+      await t.pumpAndSettle();
+      expect(basis, findsNothing);
       final download = find.text('Export full CSV');
       await reveal(t, download);
       await t.tap(download);
@@ -419,14 +458,15 @@ void main() {
       );
       await t.pumpAndSettle();
       expect(find.text('1–1 of 1 matching rows'), findsOneWidget);
-      await reveal(t, find.widgetWithText(ChoiceChip, 'Body profiles'));
-      await t.tap(find.text('Body profiles'));
+      selection.value = null;
       await t.pumpAndSettle();
+      await tapReportControl(t, 'Body Type Distribution Report');
       expect(find.text('Body Type Distribution Report'), findsOneWidget);
       expect(find.text('Apply filters'), findsNothing);
       expect(find.text('3 classified · 2 not classified'), findsOneWidget);
-      await t.tap(find.widgetWithText(ChoiceChip, 'Fitting conversion'));
+      selection.value = null;
       await t.pumpAndSettle();
+      await tapReportControl(t, 'Appointment Conversion Report');
       expect(find.text('Appointment Conversion Report'), findsOneWidget);
       expect(t.takeException(), isNull);
     },
@@ -436,7 +476,8 @@ void main() {
     (t) async {
       viewport(t, const Size(1280, 1500));
       final api = FakeAnalytics();
-      await render(t, api: api);
+      final selection = await render(t, api: api);
+      await tapReportControl(t, 'Package Popularity Report');
       await t.tap(find.text('Last 30 days'));
       await t.pumpAndSettle();
       await t.tap(find.text('Last 7 days').last);
@@ -453,21 +494,28 @@ void main() {
         find.byKey(const Key('export-report-csv')),
       );
       expect(export.onPressed, isNull);
-      await reveal(t, find.widgetWithText(ChoiceChip, 'Body profiles'));
-      await t.tap(find.widgetWithText(ChoiceChip, 'Body profiles'));
+      await tapReportControl(t, 'Refresh data');
+      expect(api.reportCalls, 3);
+      expect(api.from, DateTime(2026, 10, 10));
+      expect(find.text('From: 2026-10-09'), findsOneWidget);
+      expect(find.textContaining('Dates changed.'), findsOneWidget);
+
+      selection.value = null;
       await t.pumpAndSettle();
+      await tapReportControl(t, 'Body Type Distribution Report');
       expect(
         t
             .widget<FilledButton>(find.byKey(const Key('export-report-csv')))
             .onPressed,
         isNotNull,
       );
-      await t.tap(find.widgetWithText(ChoiceChip, 'Package demand'));
+      selection.value = null;
       await t.pumpAndSettle();
+      await tapReportControl(t, 'Package Popularity Report');
       await reveal(t, find.text('Apply filters'));
       await t.tap(find.text('Apply filters'));
       await t.pumpAndSettle();
-      expect(api.reportCalls, 3);
+      expect(api.reportCalls, 6);
       expect(api.from, DateTime(2026, 10, 9));
     },
   );
@@ -489,23 +537,25 @@ void main() {
             matchesGoldenFile('goldens/live-analytics-dashboard.png'),
           );
         }
-        await render(t, api: api, scale: scale);
+        final selection = await render(t, api: api, scale: scale);
         for (final label in [
-          'Package demand',
-          'Fitting conversion',
-          'Collections',
-          'Body profiles',
+          'Package Popularity Report',
+          'Appointment Conversion Report',
+          'Revenue Summary Report',
+          'Body Type Distribution Report',
         ]) {
-          await reveal(t, find.widgetWithText(ChoiceChip, label));
-          await t.tap(find.widgetWithText(ChoiceChip, label));
-          await t.pumpAndSettle();
+          await tapReportControl(t, label);
           expect(t.takeException(), isNull, reason: label);
-          if (size.width == 1440 && scale == 1 && label == 'Collections') {
+          if (size.width == 1440 &&
+              scale == 1 &&
+              label == 'Revenue Summary Report') {
             await expectLater(
               find.byType(MaterialApp),
               matchesGoldenFile('goldens/live-analytics-collections.png'),
             );
           }
+          selection.value = null;
+          await t.pumpAndSettle();
         }
       });
     }

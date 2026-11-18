@@ -2,15 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:luvly_app/recommendations/body_measurement_scan_screen.dart';
 import 'package:luvly_app/recommendations/body_scan.dart';
+import 'package:luvly_app/recommendations/measurement_provenance.dart';
 
 class MeasurementScanner extends BodyScanner {
   double? height;
   @override
   bool get available => true;
   @override
-  Future<Map<String, double>> estimateMeasurements(double heightCm) async {
+  Future<BodyMeasurementEstimate> estimateMeasurements(double heightCm) async {
     height = heightCm;
-    return {'Bust': 92, 'Waist': 72, 'Hips': 99};
+    return BodyMeasurementEstimate(
+      measurements: const {'Bust': 92, 'Waist': 72, 'Hips': 99},
+      heightCm: heightCm,
+      capturedAt: DateTime.now().millisecondsSinceEpoch,
+      methodVersion: 'two-view-ellipse-v1',
+    );
   }
 }
 
@@ -19,7 +25,7 @@ void main() {
     t,
   ) async {
     final scanner = MeasurementScanner();
-    Map<String, double>? returned;
+    ReviewedMeasurements? returned;
     t.view.physicalSize = const Size(320, 800);
     t.view.devicePixelRatio = 1;
     addTearDown(t.view.resetPhysicalSize);
@@ -81,7 +87,12 @@ void main() {
     await t.enterText(waist, '74.5');
     await tapVisible(find.text('I checked these measurements with a tape.'));
     await tapVisible(use);
-    expect(returned, {'Bust': 92, 'Waist': 74.5, 'Hips': 99});
+    expect(returned!.measurements, {'Bust': 92, 'Waist': 74.5, 'Hips': 99});
+    expect(returned!.estimate.measurements['Waist'], 72);
+    expect(returned!.estimate.heightCm, 168);
+    expect(returned!.provenance.fields['Waist']!.source, 'camera-corrected');
+    expect(returned!.provenance.fields['Bust']!.source, 'camera-reviewed');
+    expect(returned!.provenance.validFor(returned!.measurements), isTrue);
     expect(t.takeException(), isNull);
   });
 }

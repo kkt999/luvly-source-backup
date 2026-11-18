@@ -899,6 +899,36 @@ class HttpPaymentApi implements PaymentApi {
           'DUPLICATE_SERVICE' => 'Each service can only appear once.',
           'REQUIRED_SERVICE_NEEDED' =>
             'Include at least one mandatory service.',
+          'BRIDAL_SERVICE_PRICE_CHANGED' =>
+            'A linked service price changed. Select its current catalogue revision and review again.',
+          'INVALID_BRIDAL_SERVICE_PRICE' =>
+            'Check the service name, pricing method and unit price.',
+          'INVALID_BUNDLE_DISCOUNT' =>
+            'Enter a valid bundle discount that does not exceed the subtotal.',
+          'PACKAGE_PRICING_CONFIGURATION_REQUIRED' =>
+            'Link a catalogue price to each service and choose a price source for each included gown.',
+          'APPROVED_PACKAGE_SUBTOTAL_TOO_LOW' =>
+            'The configured services and gowns total less than the approved price. Check the linked prices and quantities.',
+          'PACKAGE_REVIEW_CHANGED' =>
+            'The package changed since review. Review the saved draft again before publishing.',
+          'CUSTOM_SERVICE_REQUIRES_GOWN' =>
+            'A selected service or accessory requires a gown rental. Review your choices.',
+          'INVALID_CUSTOM_EVENT_DATE' =>
+            'Choose a valid event date for your service quote.',
+          'INVALID_STANDALONE_ELIGIBILITY' =>
+            'Enable custom packages and choose a supported standalone service type.',
+          'SERVICE_APPOINTMENT_TEAM_REVIEW' =>
+            'Contact Luvly to arrange the timing and payment for this service quote.',
+          'SERVICE_APPOINTMENT_DATE' =>
+            'Choose an appointment on or before your event date.',
+          'PACKAGE_GOWN_ALLOWANCE_REQUIRED' =>
+            'Set an active standard gown allowance in Manage service prices before reviewing this package.',
+          'PACKAGE_GOWN_PRICE_REQUIRED' =>
+            'A selected gown needs a valid rental price before it can be quoted.',
+          'INVALID_PACKAGE_GOWN_PRICING' =>
+            'Choose one distinct, eligible catalogue gown price per included gown.',
+          'INVALID_PACKAGE_COMPONENT' =>
+            'Check linked service references, pricing methods and quantities.',
           'PACKAGE_CHANGED' =>
             'This package has changed. Reopen it to review the latest details and price.',
           'ACCESSORY_CATALOGUE_CHANGED' =>

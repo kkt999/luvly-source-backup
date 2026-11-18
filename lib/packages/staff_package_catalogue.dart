@@ -4,6 +4,11 @@ import '../shared/list_controls.dart';
 import 'package_api.dart';
 import 'package_filters.dart';
 
+String staffPackagePrice(BridalPackage package) =>
+    package.serviceBased && package.draft
+    ? 'Pricing pending'
+    : packageMoney(package.basePriceCents);
+
 List<BridalPackage> sortStaffPackages(
   Iterable<BridalPackage> source,
   String sort,
@@ -107,7 +112,7 @@ class _StaffPackageCatalogueState extends State<StaffPackageCatalogue> {
                 value: 'status',
                 child: Text(p.active ? 'Deactivate' : 'Review & publish'),
               ),
-            if (widget.onRemove != null) ...[
+            if (widget.onRemove != null && !p.serviceBased) ...[
               const PopupMenuDivider(),
               const PopupMenuItem(value: 'remove', child: Text('Delete')),
             ],
@@ -283,10 +288,14 @@ class _StaffPackageCatalogueState extends State<StaffPackageCatalogue> {
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                             gap(6),
-                            Pill(p.statusLabel),
+                            Pill(
+                              p.pendingDraft
+                                  ? '${p.statusLabel} · Pending changes'
+                                  : p.statusLabel,
+                            ),
                             gap(10),
                             Text(
-                              packageMoney(p.basePriceCents),
+                              staffPackagePrice(p),
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                             Text(
@@ -338,10 +347,14 @@ class _StaffPackageCatalogueState extends State<StaffPackageCatalogue> {
                         ],
                       ),
                     ),
-                    cell(packageMoney(p.basePriceCents)),
+                    cell(staffPackagePrice(p)),
                     cell('${p.includedGownCount} per rental'),
                     SizedBox(width: 225, child: serviceSummary(p)),
-                    Pill(p.statusLabel),
+                    Pill(
+                      p.pendingDraft
+                          ? '${p.statusLabel} · Pending changes'
+                          : p.statusLabel,
+                    ),
                     actions(p),
                   ],
               ],
@@ -399,9 +412,13 @@ Future<void> showStaffPackageDetails(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Pill(p.statusLabel),
+            Pill(
+              p.pendingDraft
+                  ? '${p.statusLabel} · Pending changes'
+                  : p.statusLabel,
+            ),
             gap(16),
-            Info('Base price', packageMoney(p.basePriceCents)),
+            Info('Base price', staffPackagePrice(p)),
             Info(
               'Gowns included',
               '${p.includedGownCount} included per rental',

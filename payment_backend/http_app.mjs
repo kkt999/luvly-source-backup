@@ -67,7 +67,7 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
           '</h1><p>Return to Luvly, open Google Calendar in your profile, and check status. If connection failed, retry and choose the Google account linked to Luvly.</p>');
         return;
       }
-      if (req.method === 'GET' && url.pathname === '/health') { send(200, { environment: 'sandbox',bookingPaymentPolicy:bookings?.feePolicy ? 1 : null,promotionsEnabled:!!promotions,staffSchedulingVersion:workforce?1:null,staffAccountsVersion:staffAccounts?1:null,analyticsLiveVersion:analyticsEvents?1:null,staffWorkspaceVersion:workspace?1:null,profilePhotosVersion:profilePhotos?1:null,recommendationProfilesVersion:recommendationProfiles?1:null,customerReviewsVersion:reviews?1:null,reviewPolicyVersion:reviews?.policyVersion??null,reviewStaffHandlingVersion:reviews?.staffHandlingVersion??null }); return; }
+      if (req.method === 'GET' && url.pathname === '/health') { send(200, { environment: 'sandbox',packagePricingVersion:packages?.publication && packages?.serviceCatalogue ? 1 : null,bookingPaymentPolicy:bookings?.feePolicy ? 1 : null,promotionsEnabled:!!promotions,staffSchedulingVersion:workforce?1:null,staffAccountsVersion:staffAccounts?1:null,analyticsLiveVersion:analyticsEvents?1:null,staffWorkspaceVersion:workspace?1:null,profilePhotosVersion:profilePhotos?1:null,recommendationProfilesVersion:recommendationProfiles?1:null,customerReviewsVersion:reviews?1:null,reviewPolicyVersion:reviews?.policyVersion??null,reviewStaffHandlingVersion:reviews?.staffHandlingVersion??null }); return; }
       if (req.method === 'GET' && url.pathname === '/return') {
         // Ignore success query parameters entirely. Do not write data or redirect
         // to untrusted continue URLs. Customer refreshes in their signed-in app.
@@ -380,13 +380,34 @@ export function createHandler({ service, packages, packageRentals, calendar, ren
         if(url.search)throw new HttpError(400,'INVALID_SELECTION');
         send(200,await packages.availability(uid,await readBody(req)));return;
       }
+      if (packages && url.pathname === '/v1/bridal-service-prices' && !url.search) {
+        if (req.method === 'GET') { send(200, await packages.serviceCatalogue.list(uid)); return; }
+        if (req.method === 'POST') { send(200, await packages.serviceCatalogue.save(uid, await readBody(req))); return; }
+      }
+      const publication = /^\/v1\/packages\/([A-Za-z0-9_-]{1,150})\/(draft|preview|publish|versions\/([1-9][0-9]*))$/.exec(url.pathname);
+      if (packages && publication && !url.search) {
+        const [, id, action, revision] = publication;
+        if (req.method === 'GET' && action === 'draft') { send(200, await packages.publication.get(uid, id)); return; }
+        if (req.method === 'GET' && revision) { send(200, await packages.publication.version(uid, id, Number(revision))); return; }
+        if (req.method === 'POST' && !revision) {
+          send(200, await packages.publication.save(uid, id, await readBody(req, false, 65536), action)); return;
+        }
+      }
       const approvedPricing = /^\/v1\/packages\/([A-Za-z0-9_-]{1,150})\/approved-pricing$/.exec(url.pathname);
       if (packages && approvedPricing && req.method === 'GET' && !url.search) {
         send(200, await packages.approvedPricing(uid, approvedPricing[1])); return;
       }
       if (packages && url.pathname === '/v1/packages') {
-        if (req.method === 'GET') { send(200, await packages.catalogue(uid, url.searchParams.get('serviceTypes') === '1', url.searchParams.get('itemPricing') === '1', url.searchParams.get('veilUpgrades') === '1')); return; }
+        if (req.method === 'GET') { send(200, await packages.catalogue(uid, url.searchParams.get('serviceTypes') === '1', url.searchParams.get('itemPricing') === '1', url.searchParams.get('veilUpgrades') === '1', url.searchParams.get('servicePricing') === '1')); return; }
         if (req.method === 'POST') { send(200, await packages.save(uid, await readBody(req, false, 65536))); return; }
+      }
+      if (packages && !url.search) {
+        if (url.pathname === '/v1/custom-package-options' && req.method === 'GET') {
+          send(200, await packages.customOptions(uid)); return;
+        }
+        if (url.pathname === '/v1/custom-package-quote' && req.method === 'POST') {
+          send(200, await packages.select(uid, await readBody(req, false, 65536), {previewOnly: true})); return;
+        }
       }
       if (packages && url.pathname === '/v1/package-selections') {
         if (req.method === 'GET') { send(200, await packages.selections(uid)); return; }

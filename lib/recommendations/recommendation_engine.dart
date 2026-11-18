@@ -1,5 +1,6 @@
 import '../catalogue/catalogue_repository.dart';
 import 'body_scan.dart';
+import 'measurement_provenance.dart';
 
 /// Deterministic styling heuristics, not a trained model or fit probability.
 const recommendationAlgorithmVersion = 'style-rules-v2';
@@ -23,6 +24,7 @@ class BridalPreferences {
     this.shareProportionStats = false,
     this.bodyScan,
     this.useScanProportions = false,
+    this.measurementProvenance = const MeasurementProvenance(),
   });
   final Map<String, double> measurements;
   final List<String> styles, colours;
@@ -31,7 +33,9 @@ class BridalPreferences {
   final bool shareProportionStats;
   final BodyScan? bodyScan;
   final bool useScanProportions;
+  final MeasurementProvenance measurementProvenance;
   bool get valid =>
+      measurementProvenance.validFor(measurements) &&
       measurements.entries.every((e) {
         final range = measurementLimits[e.key];
         return range != null &&
@@ -59,6 +63,8 @@ class BridalPreferences {
     'shareProportionStats': shareProportionStats,
     'bodyScan': bodyScan?.toJson(),
     'useScanProportions': useScanProportions,
+    if (measurementProvenance.fields.isNotEmpty)
+      'measurementProvenance': measurementProvenance.toJson(),
   };
   factory BridalPreferences.fromJson(Map<String, dynamic> d) {
     final p = BridalPreferences(
@@ -74,29 +80,42 @@ class BridalPreferences {
           ? null
           : BodyScan.fromJson(Map<String, dynamic>.from(d['bodyScan'])),
       useScanProportions: d['useScanProportions'] as bool? ?? false,
+      measurementProvenance: d['measurementProvenance'] == null
+          ? const MeasurementProvenance()
+          : MeasurementProvenance.fromJson(
+              Map<String, dynamic>.from(d['measurementProvenance']),
+            ),
     );
     if (!p.valid) throw const FormatException('Invalid bridal preferences');
     return p;
   }
-  BridalPreferences withMeasurements(Map<String, double> values) =>
-      BridalPreferences(
-        measurements: values,
-        styles: styles,
-        colours: colours,
-        maxPriceCents: maxPriceCents,
-        bodyScan: bodyScan,
-        useScanProportions: useScanProportions,
-        useProportions:
-            useProportions &&
-            ['Bust', 'Waist', 'Hips'].every(values.containsKey),
-        shareProportionStats:
-            shareProportionStats &&
-            useProportions &&
-            ['Bust', 'Waist', 'Hips'].every(values.containsKey),
-      );
+  BridalPreferences withMeasurements(
+    Map<String, double> values, {
+    MeasurementProvenance? provenance,
+  }) => BridalPreferences(
+    measurements: values,
+    measurementProvenance:
+        provenance ??
+        measurementProvenance.retained({
+          for (final key in values.keys)
+            if (values[key] == measurements[key]) key,
+        }),
+    styles: styles,
+    colours: colours,
+    maxPriceCents: maxPriceCents,
+    bodyScan: bodyScan,
+    useScanProportions: useScanProportions,
+    useProportions:
+        useProportions && ['Bust', 'Waist', 'Hips'].every(values.containsKey),
+    shareProportionStats:
+        shareProportionStats &&
+        useProportions &&
+        ['Bust', 'Waist', 'Hips'].every(values.containsKey),
+  );
   BridalPreferences withBodyScan(BodyScan? scan, bool enabled) =>
       BridalPreferences(
         measurements: measurements,
+        measurementProvenance: measurementProvenance,
         styles: styles,
         colours: colours,
         maxPriceCents: maxPriceCents,
@@ -116,6 +135,28 @@ enum ProportionGuide {
 
   const ProportionGuide(this.label);
   final String label;
+
+  String get description => switch (this) {
+    hourglass => 'Bust and hips are similar, with a more defined waist.',
+    pear => 'Hips are wider than the bust in your selected measurements.',
+    inverted => 'Bust is wider than the hips in your selected measurements.',
+    rectangle =>
+      'Bust and hips are similar, with less waist definition in this guide.',
+    oval =>
+      'Waist is close to the larger bust or hip measurement in this guide.',
+  };
+
+  String get explanation => switch (this) {
+    hourglass =>
+      'The waist is at most 75% of the smaller bust or hip measurement, after checking bust and hip balance.',
+    pear =>
+      'The hip measurement is over 5% larger than the bust, after checking the waist rule.',
+    inverted =>
+      'The bust measurement is over 5% larger than the hips, after checking the waist rule.',
+    rectangle => 'The measurements fall between the other guide thresholds.',
+    oval =>
+      'The waist measurement is at least 90% of the larger bust or hip measurement.',
+  };
 }
 
 /// Simplified app guide, not FFIT or a body scan. Shoulder width is never
@@ -180,6 +221,8 @@ class GownRecommendation {
   );
   final CatalogueDress dress;
   final int? score;
+  int? get validScore =>
+      score != null && score! >= 0 && score! <= 100 ? score : null;
   final List<MatchComponent> components;
   final String? budgetReason;
 }
@@ -249,15 +292,17 @@ List<GownRecommendation> recommendGowns(
       ),
     );
   }
-  results.sort((a, b) {
-    final score = (b.score ?? 0).compareTo(a.score ?? 0);
-    if (score != 0) return score;
-    final price = a.dress.priceCents.compareTo(b.dress.priceCents);
-    if (price != 0) return price;
-    final name = a.dress.name.compareTo(b.dress.name);
-    return name != 0 ? name : a.dress.id.compareTo(b.dress.id);
-  });
+  results.sort(compareGownRecommendations);
   return List.unmodifiable(results);
+}
+
+int compareGownRecommendations(GownRecommendation a, GownRecommendation b) {
+  final score = (b.validScore ?? -1).compareTo(a.validScore ?? -1);
+  if (score != 0) return score;
+  final price = a.dress.priceCents.compareTo(b.dress.priceCents);
+  if (price != 0) return price;
+  final name = a.dress.name.compareTo(b.dress.name);
+  return name != 0 ? name : a.dress.id.compareTo(b.dress.id);
 }
 
 /// App-specific, unvalidated styling heuristics; not anthropometric thresholds.

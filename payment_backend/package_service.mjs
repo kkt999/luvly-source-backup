@@ -1,3 +1,6 @@
+import { customPackageId, customPackageOptions, resolveCustomPackage, standaloneAppointmentType, validateCustomEventPlan } from './custom_package_pricing.mjs';
+import { BridalServiceCatalogue } from './bridal_service_pricing.mjs';
+import { PackagePublication, selectionPricingSnapshot } from './package_publication.mjs';
 import { accessoryPricing } from './package_service_types.mjs';
 import { priceAccessories, accessoryCatalogue, accessoryService, standardVeilFor } from './accessory_catalogue.mjs';
 import { approvedPackagePricing } from './approved_package_pricing.mjs';
@@ -113,10 +116,26 @@ export function priceSelection(packageData, removedIds, addonIds) {
   return { services, totalCents };
 }
 
+async function validatePublishedGowns(tx, input, current) {
+  const deactivating = !input.active && current?.active && current.allCatalogueGowns &&
+    current.includedGownCount === input.includedGownCount;
+  if (input.allCatalogueGowns && input.includedGownCount > 0 && !deactivating) {
+    const count = await countStockedGowns(tx, await tx.listDresses(), input.includedGownCount);
+    ensure(count >= input.includedGownCount, 'PACKAGE_GOWN_LIMIT_CHANGED', 409);
+  } else if (!input.allCatalogueGowns && input.active && input.includedGownCount > 0) {
+    const ids = input.eligibleDressIds ?? [];
+    ensure(ids.length >= input.includedGownCount, 'PACKAGE_GOWNS_NOT_READY', 409);
+    const gowns = await packageGownRows(tx, input);
+    ensure(gowns.length === ids.length, 'PACKAGE_GOWN_UNAVAILABLE', 409);
+    ensure(await countStockedGowns(tx, gowns, input.includedGownCount) >= input.includedGownCount, 'PACKAGE_GOWNS_NOT_READY', 409);
+  }
+}
+
 // Package collections stay closed to direct client writes. Every request uses a
 // verified Firebase identity and trusted transactions, like the payment API.
 export class PackageService {
-  constructor({ store, paymentService, now = Date.now, bookings }) { Object.assign(this, { store, paymentService, now }); this.bookings=bookings ?? new BookingService({store,now}); }
+  constructor({ store, paymentService, now = Date.now, bookings }) { Object.assign(this, { store, paymentService, now }); this.bookings=bookings ?? new BookingService({store,now}); this.serviceCatalogue = new BridalServiceCatalogue(store, now); this.publication = new PackagePublication(store, now, validatePackage, validatePublishedGowns); }
+  customOptions(uid) { return customPackageOptions(this.store, uid); }
   async gowns(uid) {
     await this.paymentService.access(uid);
     const rows = await this.store.listDresses();
@@ -127,11 +146,13 @@ export class PackageService {
       availability: d.availability, published: true, revision: d.revision, arModelId: d.arModelId ?? '',
     })), limited: rows.length >= 100 };
   }
-  async catalogue(uid, supportsServiceTypes = false, supportsItemPricing = false, supportsVeilUpgrades = false) {
+  async catalogue(uid, supportsServiceTypes = false, supportsItemPricing = false, supportsVeilUpgrades = false, supportsServicePricing = false) {
     const actor = await this.paymentService.access(uid);
     const rows = await this.store.list('servicePackages');
-    const packages = rows.filter(p => actor.role !== 'bride' ||
-      (p.active && (supportsServiceTypes || !(p.services ?? []).some(s => s.serviceType !== undefined)) &&
+    const drafts = actor.role === 'manager' && supportsServicePricing ? await this.store.list('servicePackageDrafts') : [];
+    const pending = new Set(drafts.map(draft => draft.id));
+    const packages = rows.map(pkg => pending.has(pkg.id) ? {...pkg, pendingDraft: true} : pkg).filter(p => actor.role !== 'bride' ||
+      (p.active && (supportsServicePricing || p.pricingModel !== 'service-based') && (supportsServiceTypes || !(p.services ?? []).some(s => s.serviceType !== undefined)) &&
         (supportsItemPricing || !(p.services ?? []).some(s => accessoryPricing(s) !== 'allowance')) &&
         (supportsVeilUpgrades || !(p.services ?? []).some(s => s.standardVeilId !== undefined))))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -139,6 +160,12 @@ export class PackageService {
       // Earlier customer apps still read a list of eligible IDs from this response.
       const eligibleDressIds = (await this.store.listDresses()).filter(d => rentableSizes(d).length > 0).map(d => d.id);
       return {packages: packages.map(p => p.allCatalogueGowns && p.includedGownCount > 0 ? {...p, eligibleDressIds} : p), limited: rows.length >= 100};
+    }
+    for (const {id, configuration} of drafts) {
+      if (rows.some(pkg => pkg.id === id)) continue;
+      packages.push({id, name: configuration.name || 'Untitled package', description: configuration.description ?? '',
+        basePriceCents: 0, services: [], active: false, draft: true, revision: 0,
+        includedGownCount: configuration.includedGownCount ?? 0, pricingModel: 'service-based'});
     }
     return {packages, limited: rows.length >= 100};
   }
@@ -157,13 +184,28 @@ export class PackageService {
     });
   }
   async availability(uid, input) {
-    ensure(keys(input,['packageId','revision','removedIds','addonIds','rentalPlan']) && validId(input.packageId) && Number.isInteger(input.revision),'INVALID_SELECTION');
+    ensure(keys(input,['packageId','revision','removedIds','addonIds','rentalPlan','customServices']) && validId(input.packageId) && Number.isInteger(input.revision),'INVALID_SELECTION');
     return this.store.atomic(async tx => {
       const staff=await tx.get(`staff/${uid}`),bride=await tx.get(`brides/${uid}`);
       ensure(!staff&&bride,'BRIDE_REQUIRED',403);
-      const p=await tx.get(`servicePackages/${input.packageId}`);
+      const custom = input.packageId === customPackageId;
+      const p = custom ? {active:true, revision:1, allCatalogueGowns:true, includedGownCount:1} :
+        await tx.get(`servicePackages/${input.packageId}`);
       ensure(p?.active===true&&p.revision===input.revision,'PACKAGE_CHANGED',409);
-      const priced=priceSelection(p,input.removedIds,input.addonIds),now=this.now();
+      let priced;
+      if (custom) {
+        ensure(Array.isArray(input.customServices) && input.customServices.length <= 10, 'INVALID_CUSTOM_PACKAGE');
+        const services = await Promise.all(input.customServices.map(async option => {
+          ensure(validId(option?.id), 'INVALID_CUSTOM_PACKAGE_SERVICE');
+          const entry = await tx.get(`bridalServicePrices/${option.id}`);
+          ensure(entry?.active && entry.customEligible !== false && entry.revision === option.revision, 'BRIDAL_SERVICE_PRICE_CHANGED', 409);
+          return entry;
+        }));
+        priced = {services};
+      } else {
+        priced = priceSelection(p,input.removedIds,input.addonIds);
+      }
+      const now=this.now();
       const dates=packageDates(priced,input.rentalPlan,now);
       const gowns=await Promise.all((await packageGownRows(tx,p)).map(async d=>{
         const dressId=d.id;
@@ -180,10 +222,12 @@ export class PackageService {
   }
   async save(uid, input) {
     validatePackage(input);
+    ensure(input.id !== customPackageId, 'INVALID_PACKAGE');
     return this.store.atomic(async tx => {
       const actor = await tx.get(`staff/${uid}`);
       ensure(actor?.active === true && actor.role === 'manager', 'MANAGER_REQUIRED', 403);
       const current = await tx.get(`servicePackages/${input.id}`);
+      ensure(current?.pricingModel !== 'service-based' && !(await tx.get(`servicePackageDrafts/${input.id}`)), 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
       ensure((current?.revision ?? 0) === input.revision, 'PACKAGE_CHANGED', 409);
       // Old clients must not silently remove a configured gown entitlement.
       ensure(!current?.includedGownCount || Object.hasOwn(input, 'includedGownCount'), 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
@@ -193,18 +237,7 @@ export class PackageService {
       const standardIds = new Set((current?.services ?? []).filter(s => s.standardVeilId !== undefined).map(s => s.id));
       ensure(input.services.every(s => !standardIds.has(s.id) || s.standardVeilId !== undefined),
         'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
-      const deactivating = !input.active && current?.active && current.allCatalogueGowns &&
-        current.includedGownCount === input.includedGownCount;
-      if (input.allCatalogueGowns && input.includedGownCount > 0 && !deactivating) {
-        const count = await countStockedGowns(tx, await tx.listDresses(), input.includedGownCount);
-        ensure(count >= input.includedGownCount, 'PACKAGE_GOWN_LIMIT_CHANGED', 409);
-      } else if (!input.allCatalogueGowns && input.active && input.includedGownCount > 0) {
-        const ids = input.eligibleDressIds ?? [];
-        ensure(ids.length >= input.includedGownCount, 'PACKAGE_GOWNS_NOT_READY', 409);
-        const gowns = await packageGownRows(tx, input);
-        ensure(gowns.length === ids.length, 'PACKAGE_GOWN_UNAVAILABLE', 409);
-        ensure(await countStockedGowns(tx, gowns, input.includedGownCount) >= input.includedGownCount, 'PACKAGE_GOWNS_NOT_READY', 409);
-      }
+      await validatePublishedGowns(tx, input, current);
       const { accessoryPricingApproved, ...configuration } = input;
       if (input.active && input.services.some(s => accessoryPricing(s) !== 'allowance'))
         ensure(accessoryPricingApproved === true, 'PACKAGE_ACCESSORY_APPROVAL_REQUIRED', 409);
@@ -221,6 +254,7 @@ export class PackageService {
       const actor = await tx.get(`staff/${uid}`);
       ensure(actor?.active === true && actor.role === 'manager', 'MANAGER_REQUIRED', 403);
       const current = await tx.get(`servicePackages/${id}`);
+      ensure(current?.pricingModel !== 'service-based' && !(await tx.get(`servicePackageDrafts/${id}`)), 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
       ensure(!!current, 'PACKAGE_UNAVAILABLE', 404);
       ensure(current.revision === input.revision, 'PACKAGE_CHANGED', 409);
       // Query inside the transaction: never delete a catalogue item referenced
@@ -356,8 +390,8 @@ export class PackageService {
       return next;
     });
   }
-  async select(uid, input) {
-    ensure(keys(input, ['requestId', 'packageId', 'revision', 'removedIds', 'addonIds', 'gowns', 'accessories', 'accessoryCatalogueVersion','rentalPlan','expectedTotalCents']) && validId(input.requestId) && validId(input.packageId) && Number.isInteger(input.revision) &&
+  async select(uid, input, {previewOnly = false} = {}) {
+    ensure(keys(input, ['requestId', 'packageId', 'revision', 'removedIds', 'addonIds', 'gowns', 'accessories', 'accessoryCatalogueVersion','rentalPlan','expectedTotalCents','customServices','quoteId']) && validId(input.requestId) && validId(input.packageId) && Number.isInteger(input.revision) &&
       (input.expectedTotalCents === undefined || amount(input.expectedTotalCents)), 'INVALID_SELECTION');
     ensure(Array.isArray(input.removedIds) && Array.isArray(input.addonIds) && input.removedIds.length <= 12 && input.addonIds.length <= 12, 'INVALID_SELECTION');
     const gowns = input.gowns ?? [];
@@ -366,6 +400,11 @@ export class PackageService {
       new Set(gowns.map(g => g.dressId)).size === gowns.length, 'INVALID_GOWN_SELECTION');
     const accessories = input.accessories ?? [];
     ensure(Array.isArray(accessories) && accessories.length <= 24, 'INVALID_ACCESSORY_SELECTION');
+    const custom = input.packageId === customPackageId;
+    ensure(!previewOnly || custom, 'INVALID_SELECTION');
+    ensure(custom ? Array.isArray(input.customServices) && input.rentalPlan && input.revision === 1 &&
+      input.removedIds.length === 0 :
+      input.customServices === undefined && input.quoteId === undefined, 'INVALID_SELECTION');
     const id = hash(`${uid}:${input.requestId}`);
     const fingerprintParts = [input.packageId, input.revision, [...input.removedIds].sort(), [...input.addonIds].sort()];
     // Retain the old fingerprint for no-gown selections so existing retries stay safe.
@@ -373,13 +412,20 @@ export class PackageService {
     if (accessories.length) fingerprintParts.push(input.accessoryCatalogueVersion, accessories);
     if (input.rentalPlan !== undefined) fingerprintParts.push(['rentalPlan',input.rentalPlan]);
     if (input.expectedTotalCents !== undefined) fingerprintParts.push(['expectedTotalCents', input.expectedTotalCents]);
+    if (custom) fingerprintParts.push(input.customServices, input.quoteId ?? null);
     const fingerprint = JSON.stringify(fingerprintParts);
     return this.store.atomic(async tx => {
       const staff = await tx.get(`staff/${uid}`), bride = await tx.get(`brides/${uid}`);
       ensure(!staff && !!bride, 'BRIDE_REQUIRED', 403);
       const previous = await tx.get(`packageSelections/${id}`);
-      if (previous) { ensure(previous.fingerprint === fingerprint, 'REQUEST_CONFLICT', 409); return previous; }
-      const p = await tx.get(`servicePackages/${input.packageId}`);
+      if (!previewOnly && previous) { ensure(previous.fingerprint === fingerprint, 'REQUEST_CONFLICT', 409); return previous; }
+      const serviceOnly = custom && gowns.length === 0;
+      if (serviceOnly) {
+        validateCustomEventPlan(input.rentalPlan, this.now());
+        ensure(input.addonIds.length === 0 && accessories.length === 0, 'CUSTOM_SERVICE_REQUIRES_GOWN');
+      }
+      const p = custom ? await resolveCustomPackage(tx, gowns, input.customServices) :
+        await tx.get(`servicePackages/${input.packageId}`);
       ensure(p?.active === true, 'PACKAGE_UNAVAILABLE', 409);
       ensure(p.revision === input.revision, 'PACKAGE_CHANGED', 409);
       const priced = priceSelection(p, input.removedIds, input.addonIds);
@@ -387,7 +433,7 @@ export class PackageService {
         {requireItems: input.rentalPlan !== undefined});
       priced.totalCents += accessoryPrice.accessoryExtraCents;
       ensure(amount(priced.totalCents), 'INVALID_PACKAGE_PRICE');
-      if (p.services.some(s => s.serviceType !== undefined)) {
+      if (!previewOnly && (custom || p.services.some(s => s.serviceType !== undefined))) {
         ensure(input.expectedTotalCents !== undefined, 'PACKAGE_CLIENT_UPDATE_REQUIRED', 409);
       }
       if ((p.allCatalogueGowns || p.services.some(s => s.serviceType !== undefined)) && p.includedGownCount > 0) {
@@ -407,30 +453,56 @@ export class PackageService {
       }
       const selection = { id, uid, customerName: bride.name, packageId: p.id, packageRevision: p.revision,
         name: p.name, description: p.description, basePriceCents: p.basePriceCents, ...priced, ...accessoryPrice,
+        ...selectionPricingSnapshot(p, priced, accessoryPrice),
         includedGownCount: p.includedGownCount ?? 0, selectedGowns,
         removedServices: p.services.filter(s => input.removedIds.includes(s.id)),
-        status: 'Confirmed', createdAt: this.now(), fingerprint, appointmentIds: [], invoiceId: null };
-      if(input.rentalPlan!==undefined) {
+        status: serviceOnly ? 'Quoted' : 'Confirmed', createdAt: this.now(), fingerprint, appointmentIds: [], invoiceId: null };
+      if (serviceOnly) {
+        Object.assign(selection, {rentalPlan: input.rentalPlan, rentalPlanRevision: 1,
+          serviceOnly: true, serviceAppointmentType: standaloneAppointmentType(priced.services)});
+      } else if(input.rentalPlan!==undefined) {
         const dates=packageDates(selection,input.rentalPlan,this.now());
         await requireSelectedAvailability(tx,selection,dates,this.now());
         Object.assign(selection,{rentalPlan:input.rentalPlan,rentalPlanRevision:1,selectionFlowVersion:1});
+      }
+      if (custom) {
+        selection.packageType = 'Custom';
+        selection.customServices = input.customServices.map(({id, revision, quantity}) => ({id, revision, quantity}));
+        const quoteId = hash(JSON.stringify([uid, selection.pricingSnapshot, selection.selectedGowns, selection.rentalPlan]));
+        if (previewOnly) return {quoteId, totalCents: selection.totalCents, pricingSnapshot: selection.pricingSnapshot,
+          selectedGowns, selectedAccessories: selection.selectedAccessories};
+        ensure(input.quoteId === quoteId, 'PACKAGE_CHANGED', 409);
+        selection.quoteId = quoteId;
       }
       tx.set(`packageSelections/${id}`, selection);
       return selection;
     });
   }
   async revise(uid, selectionId, input) {
-    ensure(validId(selectionId)&&keys(input,['requestId','revision','packageId','packageRevision','removedIds','addonIds','gowns','accessories','accessoryCatalogueVersion','previewOnly','expectedTotalCents','rentalPlan','planRevision'])&&validId(input.requestId)&&Number.isSafeInteger(input.revision)&&typeof input.previewOnly==='boolean'&&(input.packageId===undefined||validId(input.packageId)),'INVALID_SELECTION');
+    ensure(validId(selectionId)&&keys(input,['requestId','revision','packageId','packageRevision','removedIds','addonIds','gowns','accessories','accessoryCatalogueVersion','previewOnly','expectedTotalCents','rentalPlan','planRevision','customServices'])&&validId(input.requestId)&&Number.isSafeInteger(input.revision)&&typeof input.previewOnly==='boolean'&&(input.packageId===undefined||validId(input.packageId)),'INVALID_SELECTION');
     ensure(Array.isArray(input.gowns)&&input.gowns.length<=MAX_PACKAGE_GOWNS&&input.gowns.every(g=>keys(g,['dressId','size','revision'])&&validId(g.dressId)&&text(g.size,1,40)&&Number.isInteger(g.revision))&&new Set(input.gowns.map(g=>g.dressId)).size===input.gowns.length,'INVALID_GOWN_SELECTION');
     return this.store.atomic(async tx=>{
       const staff=await tx.get(`staff/${uid}`),bride=await tx.get(`brides/${uid}`),s=await tx.get(`packageSelections/${selectionId}`);
       ensure(!staff&&bride&&s?.uid===uid,'SELECTION_ACCESS_DENIED',403);
       ensure(!s.rentalId&&!s.invoiceId,'FITTING_ORDER_LOCKED',409);
-      const fingerprint=JSON.stringify([input.revision,input.packageRevision,input.removedIds,input.addonIds,input.gowns,input.accessories,input.accessoryCatalogueVersion,input.expectedTotalCents,...(input.packageId===undefined?[]:[input.packageId]),...(input.rentalPlan===undefined?[]:[input.rentalPlan,input.planRevision])]);
+      const fingerprint=JSON.stringify([input.revision,input.packageRevision,input.removedIds,input.addonIds,input.gowns,input.accessories,input.accessoryCatalogueVersion,input.expectedTotalCents,...(input.customServices === undefined ? [] : [input.customServices]),...(input.packageId===undefined?[]:[input.packageId]),...(input.rentalPlan===undefined?[]:[input.rentalPlan,input.planRevision])]);
       if(!input.previewOnly&&s.lastSelectionChange?.requestId===input.requestId){ensure(s.lastSelectionChange.fingerprint===fingerprint,'REQUEST_CONFLICT',409);return {totalCents:s.totalCents,saved:true};}
       ensure((s.selectionRevision??0)===input.revision,'FITTING_SELECTION_CHANGED',409);
       const switching=input.packageId!==undefined&&input.packageId!==s.packageId;
-      const p=await tx.get(`servicePackages/${input.packageId??s.packageId}`);
+      const custom = (input.packageId ?? s.packageId) === customPackageId;
+      ensure(!switching || s.packageType !== 'Custom' && !custom, 'INVALID_CUSTOM_PACKAGE', 409);
+      ensure(custom || input.customServices === undefined, 'INVALID_SELECTION');
+      const serviceOnly = custom && input.gowns.length === 0;
+      if (custom && (serviceOnly || s.serviceOnly === true)) {
+        ensure((s.appointmentIds ?? []).length === 0, 'FITTING_ORDER_LOCKED', 409);
+      }
+      if (serviceOnly) {
+        validateCustomEventPlan(input.rentalPlan ?? s.rentalPlan, this.now());
+        ensure(Array.isArray(input.addonIds) && input.addonIds.length === 0 &&
+          Array.isArray(input.accessories) && input.accessories.length === 0, 'CUSTOM_SERVICE_REQUIRES_GOWN');
+      }
+      const p = custom ? await resolveCustomPackage(tx,input.gowns,input.customServices ?? s.customServices) :
+        await tx.get(`servicePackages/${input.packageId??s.packageId}`);
       ensure(p?.active&&p.revision===input.packageRevision,'PACKAGE_CHANGED',409);
       ensure(!switching||p.includedGownCount>0,'PACKAGE_GOWN_COUNT',409);
       const priced=priceSelection(p,input.removedIds,input.addonIds),accessories=priceAccessories(priced.services,input.accessories,input.accessoryCatalogueVersion,
@@ -454,7 +526,7 @@ export class PackageService {
       if ((p.allCatalogueGowns || p.services.some(s => accessoryPricing(s) !== 'allowance')) &&
           p.includedGownCount > 0) ensure(rentalPlan, 'INVALID_RENTAL_DATE');
       if(input.rentalPlan!==undefined)ensure(input.planRevision===(s.rentalPlanRevision??0),'RENTAL_PLAN_CHANGED',409);
-      if(rentalPlan) {
+      if(rentalPlan && !serviceOnly) {
         const dates=packageDates(priced,rentalPlan,this.now());
         for(const id of s.appointmentIds??[]) {
           const visit=await tx.get(`appointments/${id}`);
@@ -466,16 +538,27 @@ export class PackageService {
           p.services.some(s=>accessoryPricing(s)!=='allowance'))
           await requireSelectedAvailability(tx,{selectedGowns,selectedAccessories:accessories.selectedAccessories},dates,this.now());
       }
-      if(input.previewOnly)return {totalCents,subtotalCents:priced.totalCents,promotion,selectedGowns,accessoryExtraCents:accessories.accessoryExtraCents};
+      if(input.previewOnly)return {totalCents,subtotalCents:priced.totalCents,promotion,selectedGowns,accessoryExtraCents:accessories.accessoryExtraCents,...selectionPricingSnapshot(p,priced,accessories,totalCents)};
       ensure(input.expectedTotalCents===totalCents,'DEPOSIT_QUOTE_CHANGED',409);
       ensure((s.selectionHistory??[]).length<50,'FITTING_SELECTION_LIMIT',409);
-      const next={...s,packageId:p.id,name:p.name,description:p.description,basePriceCents:p.basePriceCents,packageRevision:p.revision,...priced,...accessories,totalCents,promotion,promotionRevision:(s.promotionRevision??0)+1,
+      const next={...s,packageId:p.id,name:p.name,description:p.description,basePriceCents:p.basePriceCents,packageRevision:p.revision,...priced,...accessories,...(s.pricingSnapshot ? {pricingSnapshot:null} : {}),...selectionPricingSnapshot(p,priced,accessories,totalCents),totalCents,promotion,promotionRevision:(s.promotionRevision??0)+1,
         ...(input.rentalPlan===undefined?{}:{rentalPlan,rentalPlanRevision:(s.rentalPlanRevision??0)+1,selectionFlowVersion:1}),
-        includedGownCount:p.includedGownCount??0,selectedGowns,removedServices:p.services.filter(v=>input.removedIds.includes(v.id)),selectionRevision:input.revision+1,
+        includedGownCount:p.includedGownCount??0,selectedGowns,...(custom ? {customServices:(input.customServices ?? s.customServices).map(({id,revision,quantity})=>({id,revision,quantity}))} : {}),removedServices:p.services.filter(v=>input.removedIds.includes(v.id)),selectionRevision:input.revision+1,
         lastSelectionChange:{requestId:input.requestId,fingerprint,by:uid,at:this.now()},selectionHistory:[...(s.selectionHistory??[]),{packageId:s.packageId,name:s.name,rentalPlan:s.rentalPlan??null,selectedGowns:s.selectedGowns??[],selectedAccessories:s.selectedAccessories??[],services:s.services??[],totalCents:s.totalCents,at:this.now()}],
         fittingWorkflowVersion:2,fittingQuote:null,fittingQuoteHistory:[...(s.fittingQuoteHistory??[]),...(s.fittingQuote?[s.fittingQuote]:[])].slice(-20),
         fittingDecisionHistory:[...(s.fittingDecisionHistory??[]),...(s.fittingDecision?[s.fittingDecision]:[])].slice(-20),
         fittingDecision:s.fittingDecision?{...s.fittingDecision,state:'AwaitingReview',outcome:'Reselect'}:null,fittingDecisionRevision:(s.fittingDecisionRevision??0)+1};
+      if (custom) {
+        next.serviceOnly = serviceOnly;
+        next.serviceAppointmentType = serviceOnly ? standaloneAppointmentType(priced.services) : null;
+        next.status = serviceOnly ? 'Quoted' : 'Confirmed';
+        if (serviceOnly) {
+          delete next.selectionFlowVersion;
+          delete next.fittingWorkflowVersion;
+          next.fittingChoice = null;
+          next.fittingDecision = null;
+        }
+      }
       tx.set(`packageSelections/${selectionId}`,next);return {totalCents,saved:true};
     });
   }
@@ -534,13 +617,20 @@ export class PackageService {
     ensure(validId(selectionId) && keys(input, ['requestId', 'type', 'startAt', 'notes','feePolicyVersion']) && validId(input.requestId), 'INVALID_BOOKING');
     const start = input.startAt, now = this.now();
     ensure(Number.isSafeInteger(start) && start > now && start < now + 180 * 86400000 && start % 3600000 === 0 &&
-      [2, 3, 4, 6, 7, 8].includes(new Date(start).getUTCHours()) && ['Dress Trial', 'Bridal Consultation'].includes(input.type) && text(input.notes, 0, 700), 'INVALID_BOOKING');
+      [2, 3, 4, 6, 7, 8].includes(new Date(start).getUTCHours()) && ['Dress Trial', 'Bridal Consultation', 'Makeup Trial'].includes(input.type) && text(input.notes, 0, 700), 'INVALID_BOOKING');
     const id = hash(`${uid}:${selectionId}:${input.requestId}`);
     return this.store.atomic(async tx => {
       const staff = await tx.get(`staff/${uid}`), bride = await tx.get(`brides/${uid}`);
       const selection = await tx.get(`packageSelections/${selectionId}`);
       const existing = await tx.get(`appointments/${id}`);
       ensure(!staff && !!bride && selection?.uid === uid, 'SELECTION_ACCESS_DENIED', 403);
+      if (selection.serviceOnly === true) {
+        ensure(selection.serviceAppointmentType && input.type === selection.serviceAppointmentType,
+          'SERVICE_APPOINTMENT_TEAM_REVIEW', 409);
+        ensure(malaysiaDay(start) <= selection.rentalPlan.eventDate, 'SERVICE_APPOINTMENT_DATE', 409);
+      } else {
+        ensure(input.type !== 'Makeup Trial', 'INVALID_BOOKING');
+      }
       ensure(selection.fittingChoice?.mode!=='SkipFitting','FITTING_CHOICE_CONFLICT',409);
       ensure(text(bride.name, 1, 100) && text(bride.phone, 9, 25), 'CUSTOMER_PROFILE_REQUIRED', 409);
       const notes = `Package: ${selection.name}\nSelection: ${selectionId}${input.notes ? '\n' + input.notes : ''}`;
@@ -592,6 +682,8 @@ export class PackageService {
       if (existing) return publicInvoice(existing);
       ensure(!(selection.includedGownCount > 0) && !(selection.selectedAccessories?.length > 0), 'PACKAGE_RENTAL_CONFIRMATION_REQUIRED',409);
       ensure(booking?.status === 'Confirmed' && booking.uid === selection.uid && selection.appointmentIds.includes(input.appointmentId), 'CONFIRMED_APPOINTMENT_REQUIRED', 409);
+      ensure(selection.serviceOnly !== true || selection.serviceAppointmentType &&
+        booking.type === selection.serviceAppointmentType, 'SERVICE_APPOINTMENT_TEAM_REVIEW', 409);
       const invoice = { id, uid: selection.uid, customerName: selection.customerName, purpose: 'PackagePayment',
         title: `Package: ${selection.name}`, appointmentId: input.appointmentId, packageSelectionId: selectionId,
         amountCents: selection.totalCents, state: 'Quoted', environment: 'sandbox', createdAt: this.now(), createdBy: uid };

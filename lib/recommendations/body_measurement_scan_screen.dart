@@ -3,16 +3,19 @@ import 'package:flutter/services.dart';
 import '../src/model.dart';
 import '../support/assistant_launcher.dart';
 import 'body_scan.dart';
+import 'measurement_provenance.dart';
 
 class BodyMeasurementScanScreen extends StatefulWidget {
   const BodyMeasurementScanScreen({
     super.key,
     required this.scanner,
     required this.initialHeight,
+    this.existingMeasurements = const {},
   });
 
   final BodyScanner scanner;
   final String initialHeight;
+  final Map<String, double> existingMeasurements;
 
   @override
   State<BodyMeasurementScanScreen> createState() => _BodyMeasurementScanState();
@@ -26,6 +29,8 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
     for (final label in labels) label: TextEditingController(),
   };
   bool busy = false, hasEstimate = false, checkedWithTape = false;
+  BodyMeasurementEstimate? originalEstimate;
+  int? tapeCheckedAt;
   bool ownerBound = false;
   String? error, owner;
   int generation = 0;
@@ -39,6 +44,8 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
       busy = false;
       hasEstimate = false;
       checkedWithTape = false;
+      originalEstimate = null;
+      tapeCheckedAt = null;
       error = null;
       for (final controller in measurements.values) {
         controller.clear();
@@ -82,9 +89,15 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
     try {
       final estimate = await widget.scanner.estimateMeasurements(heightCm);
       if (!mounted || request != generation || estimate == null) return;
+      if (!estimate.valid || estimate.heightCm != heightCm) {
+        throw const FormatException('Incomplete measurement estimate');
+      }
       setState(() {
+        originalEstimate = estimate;
+        tapeCheckedAt = null;
         for (final label in labels) {
-          measurements[label]!.text = estimate[label]!.toStringAsFixed(0);
+          measurements[label]!.text = estimate.measurements[label]!
+              .toStringAsFixed(0);
         }
         hasEstimate = true;
         checkedWithTape = false;
@@ -116,12 +129,62 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
         : null;
   }
 
-  void useMeasurements() {
-    if (busy || !checkedWithTape || !form.currentState!.validate()) return;
-    Navigator.pop(context, {
+  Future<void> useMeasurements() async {
+    if (busy ||
+        !checkedWithTape ||
+        originalEstimate == null ||
+        tapeCheckedAt == null ||
+        !form.currentState!.validate()) {
+      return;
+    }
+    final values = {
       for (final label in labels)
         label: double.parse(measurements[label]!.text.trim()),
-    });
+    };
+    final conflicts = labels
+        .where(
+          (label) =>
+              widget.existingMeasurements.containsKey(label) &&
+              widget.existingMeasurements[label] != values[label],
+        )
+        .toList();
+    final request = generation;
+    if (conflicts.isNotEmpty) {
+      final replace = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('Replace current measurements?'),
+          content: Text(
+            [
+              for (final label in conflicts)
+                '$label · current ${widget.existingMeasurements[label]} cm → reviewed ${values[label]} cm',
+              'The reviewed values will replace these fields. Save body information to update your profile.',
+            ].join('\n'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('Keep current values'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('Replace measurements'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || request != generation || replace != true) return;
+    }
+    if (!mounted || request != generation) return;
+    Navigator.pop(
+      context,
+      ReviewedMeasurements(
+        originalEstimate!,
+        values,
+        DateTime.now().millisecondsSinceEpoch,
+        tapeCheckedAt!,
+      ),
+    );
   }
 
   @override
@@ -210,7 +273,10 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
                                   validateNumber(value, 30, 300),
                               onChanged: (_) {
                                 if (checkedWithTape) {
-                                  setState(() => checkedWithTape = false);
+                                  setState(() {
+                                    checkedWithTape = false;
+                                    tapeCheckedAt = null;
+                                  });
                                 }
                               },
                             ),
@@ -221,9 +287,12 @@ class _BodyMeasurementScanState extends State<BodyMeasurementScanScreen> {
                             value: checkedWithTape,
                             onChanged: busy
                                 ? null
-                                : (v) => setState(
-                                    () => checkedWithTape = v == true,
-                                  ),
+                                : (v) => setState(() {
+                                    checkedWithTape = v == true;
+                                    tapeCheckedAt = checkedWithTape
+                                        ? DateTime.now().millisecondsSinceEpoch
+                                        : null;
+                                  }),
                             title: const Text(
                               'I checked these measurements with a tape.',
                             ),

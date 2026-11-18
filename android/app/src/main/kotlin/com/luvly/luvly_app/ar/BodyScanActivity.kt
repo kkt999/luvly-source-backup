@@ -206,7 +206,10 @@ class BodyScanActivity: ComponentActivity() {
         complete=true;provider?.unbindAll()
         setResult(Activity.RESULT_OK,Intent().putExtra("measurementEstimate",true)
             .putExtra("bustCm",round(result.bust)).putExtra("waistCm",round(result.waist))
-            .putExtra("hipsCm",round(result.hips)))
+            .putExtra("hipsCm",round(result.hips))
+            .putExtra("heightCm",intent.getDoubleExtra("heightCm",Double.NaN))
+            .putExtra("capturedAt",System.currentTimeMillis())
+            .putExtra("methodVersion","two-view-ellipse-v1"))
         finish()
     }
     override fun onPause(){active=false;epoch++;provider?.unbindAll();if(::preview.isInitialized){preview.setImageDrawable(null);displayed?.recycle();displayed=null};super.onPause()}
